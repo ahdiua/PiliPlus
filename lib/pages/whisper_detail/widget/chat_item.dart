@@ -167,6 +167,7 @@ class ChatItem extends StatelessWidget {
     required dynamic content,
     required Color textColor,
   }) {
+    return def(textColor, err: 'dev');
     try {
       switch (msgTypeFromValue(item.msgType)) {
         case MsgType.EN_MSG_TYPE_NOTIFY_MSG:
