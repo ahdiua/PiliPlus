@@ -50,6 +50,7 @@ import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/services/shutdown_timer_service.dart'
     show shutdownTimerService;
 import 'package:PiliPlus/utils/accounts.dart';
+import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
 import 'package:PiliPlus/utils/extension/scroll_controller_ext.dart';
 import 'package:PiliPlus/utils/extension/theme_ext.dart';
@@ -62,7 +63,6 @@ import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/theme_utils.dart';
 import 'package:extended_nested_scroll_view/extended_nested_scroll_view.dart';
-import 'package:floating/floating.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show SystemUiOverlayStyle;
@@ -79,11 +79,7 @@ class VideoDetailPageV extends StatefulWidget {
 }
 
 class _VideoDetailPageVState extends State<VideoDetailPageV>
-    with
-        TickerProviderStateMixin,
-        RouteAware,
-        RouteAwareMixin,
-        WidgetsBindingObserver {
+    with RouteAware, RouteAwareMixin, WidgetsBindingObserver {
   final heroTag = Get.arguments['heroTag'];
 
   late final VideoDetailController videoDetailController;
@@ -189,11 +185,6 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     final isResume = state == .resumed;
     final ctr = videoDetailController.plPlayerController..visible = isResume;
     if (isResume) {
-      // TODO: remove
-      // part of https://github.com/flutter/flutter/issues/186723
-      if (Platform.isAndroid && !showSystemBar_) {
-        setEnabledSystemUIMode(.immersiveSticky);
-      }
       if (!ctr.showDanmaku) {
         introController.startTimer();
         ctr.showDanmaku = true;
@@ -274,16 +265,14 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       }
 
       if (exitFlag) {
-        // 结束播放退出全屏
         if (autoExitFullscreen) {
           plPlayerController!.triggerFullScreen(status: false);
           if (plPlayerController!.controlsLock.value) {
             plPlayerController!.onLockControl(false);
           }
-        }
-        // 播放完展示控制栏
-        if (Platform.isAndroid) {
-          if (await Floating().pipStatus == PiPStatus.disabled) {
+        } else {
+          if (plPlayerController!.controlsLock.value &&
+              (!Platform.isAndroid || !AndroidHelper.isPipMode)) {
             plPlayerController!.onLockControl(false);
           }
         }
@@ -1367,7 +1356,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     if (videoDetailController.tabCtr.length != tabs.length) {
       videoDetailController.tabCtr.dispose();
       videoDetailController.tabCtr = TabController(
-        vsync: this,
+        vsync: videoDetailController,
         length: tabs.length,
         initialIndex: tabs.isEmpty
             ? 0
@@ -1621,9 +1610,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                             return FilledButton.tonal(
                               style: FilledButton.styleFrom(
                                 shape: const RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.all(
-                                    Radius.circular(6),
-                                  ),
+                                  borderRadius: .all(.circular(6)),
                                 ),
                                 backgroundColor: themeData
                                     .colorScheme
@@ -1641,9 +1628,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                                   item,
                                   isStein: true,
                                 );
-                                videoDetailController.getSteinEdgeInfo(
-                                  item.id,
-                                );
+                                videoDetailController.getSteinEdgeInfo(item.id);
                               },
                               child: Text(item.option!),
                             );
@@ -1998,15 +1983,12 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       },
     );
     if (isFullScreen || videoDetailController.showVideoSheet) {
+      final child = listSheetContent(enableSlide: false);
       PageUtils.showVideoBottomSheet(
         context,
-        isFullScreen: () => isFullScreen,
         child: videoDetailController.plPlayerController.darkVideoPage
-            ? Theme(
-                data: themeData,
-                child: listSheetContent(enableSlide: false),
-              )
-            : listSheetContent(enableSlide: false),
+            ? Theme(data: themeData, child: child)
+            : child,
       );
     } else {
       videoDetailController.childKey.currentState?.showBottomSheet(
@@ -2078,23 +2060,16 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
 
   void showViewPoints() {
     if (isFullScreen || videoDetailController.showVideoSheet) {
+      final child = ViewPointsPage(
+        enableSlide: false,
+        videoDetailController: videoDetailController,
+        plPlayerController: plPlayerController,
+      );
       PageUtils.showVideoBottomSheet(
         context,
-        isFullScreen: () => isFullScreen,
         child: videoDetailController.plPlayerController.darkVideoPage
-            ? Theme(
-                data: themeData,
-                child: ViewPointsPage(
-                  enableSlide: false,
-                  videoDetailController: videoDetailController,
-                  plPlayerController: plPlayerController,
-                ),
-              )
-            : ViewPointsPage(
-                enableSlide: false,
-                videoDetailController: videoDetailController,
-                plPlayerController: plPlayerController,
-              ),
+            ? Theme(data: themeData, child: child)
+            : child,
       );
     } else {
       videoDetailController.childKey.currentState?.showBottomSheet(

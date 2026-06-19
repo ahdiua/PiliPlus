@@ -73,11 +73,24 @@ abstract final class PiliAndroidHelper {
   }
 
   @pragma('vm:prefer-inline')
-  static void setPipAutoEnterEnabled(bool autoEnable) =>
-      AndroidHelper.setPipAutoEnterEnabled(
-        autoEnable,
-        PlatformDispatcher.instance.engineId!,
-      );
+  static void enterPip(
+    int width,
+    int height, {
+    required bool autoEnter,
+    required bool isLive,
+    required bool isPlaying,
+  }) => AndroidHelper.enterPip(
+    PlatformDispatcher.instance.engineId!,
+    width,
+    height,
+    autoEnter,
+    isLive,
+    isPlaying,
+  );
+
+  @pragma('vm:prefer-inline')
+  static void disableAutoEnterPip() =>
+      AndroidHelper.disableAutoEnterPip(PlatformDispatcher.instance.engineId!);
 
   static (int, int)? maxScreenSize() {
     final jIArr = AndroidHelper.maxScreenSize();
