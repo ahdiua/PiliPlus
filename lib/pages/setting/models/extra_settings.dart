@@ -46,7 +46,7 @@ import 'package:PiliPlus/utils/update.dart';
 import 'package:PiliPlus/utils/utils.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
-import 'package:flutter/material.dart' hide RefreshIndicator;
+import 'package:material_ui/material_ui.dart' hide RefreshIndicator;
 import 'package:flutter/services.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
@@ -552,6 +552,12 @@ List<SettingsModel> get extraSettings => [
     leading: const Icon(Icons.whatshot_outlined),
     getSubtitle: () => '当前优先展示「${Pref.replySortType.title}」',
     onTap: _showReplySortDialog,
+  ),
+  NormalModel(
+    title: '二级评论展示',
+    leading: const Icon(Icons.subdirectory_arrow_right_outlined),
+    getSubtitle: () => '当前优先展示「${Pref.reply2SortType.title}」',
+    onTap: _showReply2SortDialog,
   ),
   NormalModel(
     title: '动态展示',
@@ -1071,6 +1077,24 @@ Future<void> _showReplySortDialog(
   );
   if (res != null) {
     await GStorage.setting.put(SettingBoxKey.replySortType, res.index);
+    setState();
+  }
+}
+
+Future<void> _showReply2SortDialog(
+  BuildContext context,
+  VoidCallback setState,
+) async {
+  final res = await showDialog<ReplySortType>(
+    context: context,
+    builder: (context) => SelectDialog<ReplySortType>(
+      title: '二级评论展示',
+      value: Pref.reply2SortType,
+      values: ReplySortType.values.take(2).map((e) => (e, e.title)).toList(),
+    ),
+  );
+  if (res != null) {
+    await GStorage.setting.put(SettingBoxKey.reply2SortType, res.index);
     setState();
   }
 }
