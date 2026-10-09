@@ -1,0 +1,43 @@
+name: Sync upstream and release
+
+on:
+    schedule:
+        # 23:17 UTC = 09:17 AEST / 10:17 AEDT the next day.
+        - cron: '17 23 * * *'
+    workflow_dispatch:
+
+permissions:
+    contents: write
+
+concurrency:
+    group: sync-upstream
+    cancel-in-progress: false
+
+jobs:
+    sync:
+        if: github.repository == 'ahdiua/PiliPlus'
+        runs-on: ubuntu-latest
+        outputs:
+            tag: ${{ steps.sync.outputs.tag }}
+            ref: ${{ steps.sync.outputs.ref }}
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  ref: main
+                  fetch-depth: 0
+            - name: Merge upstream and prepare release
+              id: sync
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  GH_REPO: ${{ github.repository }}
+              shell: bash
+              run: bash lib/scripts/sync-upstream.sh
+
+    release:
+        needs: sync
+        if: needs.sync.outputs.tag != ''
+        uses: ./.github/workflows/build.yml
+        with:
+            tag: ${{ needs.sync.outputs.tag }}
+            ref: ${{ needs.sync.outputs.ref }}
+        secrets: inherit

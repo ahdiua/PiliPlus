@@ -1,42 +1,21 @@
 name: Build
 
 on:
-    # pull_request:
-    #     types:
-    #         - opened
-    #         - synchronize
-    #         - reopened
-    #         - ready_for_review
-    #     paths-ignore:
-    #         - "**.md"
+    push:
+        tags:
+            - '*F*'
+    workflow_call:
+        inputs:
+            tag:
+                required: true
+                type: string
+            ref:
+                required: true
+                type: string
     workflow_dispatch:
         inputs:
             build_android:
                 description: "Build Android"
-                required: false
-                default: true
-                type: boolean
-
-            build_ios:
-                description: "Build iOS"
-                required: false
-                default: true
-                type: boolean
-
-            build_mac:
-                description: "Build Mac"
-                required: false
-                default: true
-                type: boolean
-
-            build_win_x64:
-                description: "Build Win-x64"
-                required: false
-                default: true
-                type: boolean
-
-            build_linux_x64:
-                description: "Build Linux-x64"
                 required: false
                 default: true
                 type: boolean
@@ -47,18 +26,24 @@ on:
                 default: ""
                 type: string
 
+concurrency:
+    group: build-${{ inputs.tag || github.ref }}
+    cancel-in-progress: false
+
 jobs:
     android:
-        if: ${{ (github.event_name == 'pull_request' && github.repository == 'bggRGjQaUbCoE/PiliPlus') || github.event.inputs.build_android == 'true' }}
+        if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || inputs.ref != '' || github.event.inputs.build_android == 'true' }}
         name: Release Android
         runs-on: ubuntu-latest
-        permissions: write-all
+        permissions:
+            contents: write
 
         steps:
             - name: 代码迁出
               uses: actions/checkout@v7
               with:
                   fetch-depth: 0
+                  ref: ${{ inputs.ref || inputs.tag || github.ref }}
 
             - name: 构建Java环境
               uses: actions/setup-java@v5
@@ -83,29 +68,27 @@ jobs:
               run: lib/scripts/patch.ps1 android
 
             - name: Write key
-              if: github.event_name == 'workflow_dispatch'
+              env:
+                  SIGN_KEYSTORE_BASE64: ${{ secrets.SIGN_KEYSTORE_BASE64 }}
+                  KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+                  KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+                  KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
               run: |
-                  if [ ! -z "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
-                    echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 --decode > android/app/key.jks
-                    echo storeFile='key.jks' >> android/key.properties
-                    echo storePassword='${{ secrets.KEYSTORE_PASSWORD }}' >> android/key.properties
-                    echo keyAlias='${{ secrets.KEY_ALIAS }}' >> android/key.properties
-                    echo keyPassword='${{ secrets.KEY_PASSWORD }}' >> android/key.properties
-                  fi
+                  set -euo pipefail
+                  : "${SIGN_KEYSTORE_BASE64:?Missing signing keystore}"
+                  : "${KEYSTORE_PASSWORD:?Missing keystore password}"
+                  : "${KEY_ALIAS:?Missing key alias}"
+                  : "${KEY_PASSWORD:?Missing key password}"
+                  printf '%s' "$SIGN_KEYSTORE_BASE64" | base64 --decode > android/app/key.jks
+                  printf 'storeFile=key.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+                    "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
 
             - name: Set and Extract version
-              if: ${{ github.event_name == 'workflow_dispatch' }}
               shell: pwsh
               run: lib/scripts/build.ps1 android
 
             - name: Flutter Build Release Apk
-              if: ${{ github.event_name == 'workflow_dispatch' }}
-              run: flutter build apk --release --split-per-abi --dart-define-from-file=pili_release.json --no-pub
-
-            - name: Flutter Build Dev Apk
-              if: ${{ github.event_name == 'pull_request' }}
-              run: |
-                  flutter build apk --release --split-per-abi --android-project-arg dev=1 --no-pub
+              run: flutter build apk --release --target-platform android-arm64 --split-per-abi --dart-define-from-file=pili_release.json --no-pub
 
             - name: Rename
               run: |
@@ -116,12 +99,15 @@ jobs:
               shell: bash
 
             - name: Release
-              if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' }}
+              if: ${{ inputs.tag != '' || github.event_name == 'push' }}
               uses: softprops/action-gh-release@v3
               with:
-                  tag_name: ${{ github.event.inputs.tag }}
-                  name: ${{ github.event.inputs.tag }}
-                  files: PiliPlus_android_*.apk
+                  tag_name: ${{ inputs.tag || github.ref_name }}
+                  name: ${{ inputs.tag || github.ref_name }}
+                  files: PiliPlus_android_*_arm64-v8a.apk
+                  fail_on_unmatched_files: true
+                  generate_release_notes: true
+                  make_latest: true
 
             - name: 上传
               uses: actions/upload-artifact@v7
@@ -129,45 +115,4 @@ jobs:
                   archive: false
                   name: Android_arm64-v8a
                   path: PiliPlus_android_*_arm64-v8a.apk
-
-            - name: 上传
-              uses: actions/upload-artifact@v7
-              with:
-                  archive: false
-                  name: Android_armeabi-v7a
-                  path: PiliPlus_android_*_armeabi-v7a.apk
-
-            - name: 上传
-              uses: actions/upload-artifact@v7
-              with:
-                  archive: false
-                  name: Android_x86_64
-                  path: PiliPlus_android_*_x86_64.apk
-
-    ios:
-        if: ${{ (github.event_name == 'pull_request' && github.repository == 'bggRGjQaUbCoE/PiliPlus') || github.event.inputs.build_ios == 'true' }}
-        uses: ./.github/workflows/ios.yml
-        permissions: write-all
-        with:
-            tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || '' }}
-
-    mac:
-        if: ${{ github.event.inputs.build_mac == 'true' }}
-        uses: ./.github/workflows/mac.yml
-        permissions: write-all
-        with:
-            tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || '' }}
-
-    win_x64:
-        if: ${{ (github.event_name == 'pull_request' && github.repository == 'bggRGjQaUbCoE/PiliPlus') || github.event.inputs.build_win_x64 == 'true' }}
-        uses: ./.github/workflows/win_x64.yml
-        permissions: write-all
-        with:
-            tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || '' }}
-
-    linux_x64:
-        if: ${{ github.event.inputs.build_linux_x64 == 'true' }}
-        uses: ./.github/workflows/linux_x64.yml
-        permissions: write-all
-        with:
-            tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || '' }}
+                  if-no-files-found: error

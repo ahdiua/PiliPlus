@@ -28,16 +28,48 @@ abstract final class Update {
           extra: {'account': const NoAccount()},
         ),
       );
-      if (res.data is Map || res.data.isEmpty) {
+      if (res.data is! List || res.data.isEmpty) {
         if (!isAuto) {
           SmartDialog.showToast('检查更新失败，GitHub接口未返回数据，请检查网络');
         }
         return;
       }
-      final data = res.data[0];
-      final int latest =
-          DateTime.parse(data['created_at']).millisecondsSinceEpoch ~/ 1000;
-      if (BuildConfig.buildTime >= latest) {
+      // Ignore drafts, prereleases, and releases without an installable APK.
+      final releases = (res.data as List).where(
+        (data) =>
+            data['draft'] != true &&
+            data['prerelease'] != true &&
+            (!Platform.isAndroid ||
+                (data['assets'] as List).any(
+                  (asset) => (asset['name'] as String).endsWith(
+                    '_arm64-v8a.apk',
+                  ),
+                )),
+      );
+      if (releases.isEmpty) {
+        if (!isAuto) SmartDialog.showToast('暂无可用的新版本');
+        return;
+      }
+      final data = releases.first;
+      int? latestCode;
+      for (final asset in data['assets'] as List) {
+        final match = RegExp(
+          r'\+(\d+)_arm64-v8a\.apk$',
+        ).firstMatch(asset['name'] as String);
+        if (match != null) {
+          latestCode = int.parse(match.group(1)!);
+          break;
+        }
+      }
+      final latestTime =
+          DateTime.parse(
+            data['published_at'] ?? data['created_at'],
+          ).millisecondsSinceEpoch ~/
+          1000;
+      final isLatest = latestCode != null && Platform.isAndroid
+          ? BuildConfig.versionCode >= latestCode
+          : BuildConfig.buildTime >= latestTime;
+      if (isLatest) {
         if (!isAuto) {
           SmartDialog.showToast('已是最新版本');
         }
@@ -66,7 +98,7 @@ abstract final class Update {
                       Text('${data['body']}'),
                       TextButton(
                         onPressed: () => PageUtils.launchURL(
-                          '${Constants.sourceCodeUrl}/commits/main',
+                          '${Constants.releaseUrl}/commits/main',
                         ),
                         child: Text(
                           "点此查看完整更新(即commit)内容",
@@ -112,6 +144,7 @@ abstract final class Update {
       }
     } catch (e) {
       if (kDebugMode) debugPrint('failed to check update: $e');
+      if (!isAuto) SmartDialog.showToast('检查更新失败，请检查 GitHub 网络连接');
     }
   }
 
@@ -143,7 +176,7 @@ abstract final class Update {
       }
     } catch (e) {
       if (kDebugMode) debugPrint('download error: $e');
-      PageUtils.launchURL('${Constants.sourceCodeUrl}/releases/latest');
+      PageUtils.launchURL('${Constants.releaseUrl}/releases/latest');
     }
   }
 }
