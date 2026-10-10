@@ -24,6 +24,7 @@ import 'package:PiliPlus/models/common/video/live_quality.dart';
 import 'package:PiliPlus/models/common/video/subtitle_pref_type.dart';
 import 'package:PiliPlus/models/common/video/video_decode_type.dart';
 import 'package:PiliPlus/models/common/video/video_quality.dart';
+import 'package:PiliPlus/services/thread_ripper/playback_buffer.dart';
 import 'package:PiliPlus/models/user/danmaku_rule.dart';
 import 'package:PiliPlus/models/user/info.dart';
 import 'package:PiliPlus/pages/setting/pages/fullscreen_sc_size.dart'
@@ -279,6 +280,38 @@ abstract final class Pref {
       return CDNService.values.byName(cdnName);
     }
     return CDNService.backupUrl;
+  }
+
+  static bool get directCdnAuto =>
+      _setting.get(SettingBoxKey.directCdnAuto, defaultValue: false);
+
+  static bool get adaptivePlaybackBuffer =>
+      _setting.get(SettingBoxKey.adaptivePlaybackBuffer, defaultValue: true);
+
+  static bool get threadRipperEnabled =>
+      _setting.get(SettingBoxKey.threadRipperEnabled, defaultValue: false);
+
+  static bool get threadRipperOverseas =>
+      _setting.get(SettingBoxKey.threadRipperOverseas, defaultValue: true);
+
+  static bool get threadRipperEpisodeEnabled => _setting.get(
+    SettingBoxKey.threadRipperEpisodeEnabled,
+    defaultValue: true,
+  );
+
+  static bool get threadRipperAutoConcurrency => _setting.get(
+    SettingBoxKey.threadRipperAutoConcurrency,
+    defaultValue: true,
+  );
+
+  static const threadRipperConcurrencyValues = [4, 8, 16, 32, 64];
+
+  static int get threadRipperConcurrency {
+    final value = _setting.get(
+      SettingBoxKey.threadRipperConcurrency,
+      defaultValue: 8,
+    );
+    return threadRipperConcurrencyValues.contains(value) ? value as int : 8;
   }
 
   static String get banWordForRecommend =>
@@ -826,16 +859,17 @@ abstract final class Pref {
   static double get bufferSec =>
       _setting.get(SettingBoxKey.bufferSec, defaultValue: 16.0);
 
-  static Map<String, String> initBuffer([double playbackSpeed = 1.0]) {
-    final bufSec = Pref.bufferSec * playbackSpeed;
-    final bufSiz = (Pref.bufferSize * 0x100000).toStringAsFixed(0);
-    return {
-      'cache': 'yes',
-      'cache-secs': bufSec.toStringAsFixed(3),
-      'demuxer-hysteresis-secs': (bufSec / 1.5).toStringAsFixed(3),
-      'demuxer-max-bytes': bufSiz,
-      'demuxer-max-back-bytes': bufSiz,
-    };
+  static Map<String, String> initBuffer([
+    double playbackSpeed = 1.0,
+    int? bandwidth,
+  ]) {
+    return playbackBuffer(
+      sizeMiB: bufferSize,
+      seconds: bufferSec,
+      speed: playbackSpeed,
+      bandwidth: bandwidth,
+      adaptive: adaptivePlaybackBuffer,
+    );
   }
 
   static Map<String, String> initLiveBuffer() {

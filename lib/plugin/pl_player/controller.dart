@@ -30,6 +30,7 @@ import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/danmaku_options.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
 import 'package:PiliPlus/services/service_locator.dart';
+import 'package:PiliPlus/services/thread_ripper/playback_network_session.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/android/android_helper.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
@@ -49,8 +50,10 @@ import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/utils.dart';
+import 'package:PiliPlus/utils/video_utils.dart';
 import 'package:archive/archive.dart' show getCrc32;
 import 'package:canvas_danmaku/canvas_danmaku.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:easy_debounce/easy_throttle.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/services.dart'
@@ -709,11 +712,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   }) async {
     try {
       _processing = true;
+      final generation = ++_networkSettingsGeneration;
+      _networkReloadPlaying = null;
       this.isLive = isLive;
       _videoType = videoType ?? VideoType.ugc;
       this.width = width;
       this.height = height;
       this.dataSource = dataSource;
+      _sourceVolume = volume;
       _autoPlay = autoplay;
       // 初始化数据加载状态
       dataStatus.value = DataStatus.loading;
@@ -740,6 +746,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }
       // 配置Player 音轨、字幕等等
       await _createVideoController(dataSource, seekTo, volume);
+      // A setting change or a newer source may have replaced this load while
+      // its CDN probe/proxy was starting. Do not initialize that older source.
+      if (generation != _networkSettingsGeneration) return;
 
       if (_playerCount == 0) {
         _removeListeners();
@@ -768,6 +777,57 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }
     } finally {
       _processing = false;
+    }
+  }
+
+  final _networkSession = PlaybackNetworkSession(userAgent: BrowserUa.pc);
+  int _networkGeneration = 0;
+  int _networkSettingsGeneration = 0;
+  bool? _networkReloadPlaying;
+  bool _networkRestarting = false;
+  Volume? _sourceVolume;
+
+  /// Reopen at the current position after a network setting changes.
+  Future<void> reloadNetworkSettings() async {
+    if (_playerCount == 0 || isLive || _videoPlayerController == null) return;
+    final source = dataSource;
+    if (source is! NetworkSource) return;
+    final player = _videoPlayerController!;
+    final reloadGeneration = ++_networkSettingsGeneration;
+    final wasPlaying = _networkReloadPlaying ??= player.state.playing;
+    final position = player.state.position;
+    final manual = NetworkSource(
+      videoSource: source.videoCandidates?.isNotEmpty == true
+          ? VideoUtils.getCdnUrl(source.videoCandidates!)
+          : source.videoSource,
+      audioSource: source.audioCandidates?.isNotEmpty == true
+          ? VideoUtils.getCdnUrl(source.audioCandidates!, isAudio: true)
+          : source.audioSource,
+      videoCandidates: source.videoCandidates,
+      audioCandidates: source.audioCandidates,
+      bandwidth: source.bandwidth,
+    );
+    try {
+      _networkRestarting = true;
+      _networkGeneration++;
+      _networkSession.cancel();
+      await pause(notify: false);
+      if (reloadGeneration != _networkSettingsGeneration || _playerCount == 0) {
+        return;
+      }
+      dataSource = manual;
+      await _createVideoController(manual, position, _sourceVolume);
+      if (reloadGeneration == _networkSettingsGeneration &&
+          wasPlaying && _playerCount > 0) {
+        await play();
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('reload network settings failed: $e');
+      SmartDialog.showToast('切换播放设置失败，请重新加载视频');
+    } finally {
+      if (reloadGeneration == _networkSettingsGeneration) {
+        _networkReloadPlaying = null;
+      }
     }
   }
 
@@ -868,7 +928,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     return player;
   }
 
-  late final buffer = Pref.initBuffer(_playbackSpeed.value);
   late final liveBuffer = Pref.initLiveBuffer();
 
   // 配置播放器
@@ -877,6 +936,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     Duration? seekTo,
     Volume? volume,
   ) async {
+    final generation = ++_networkGeneration;
+    _networkSession.cancel();
     isBuffering.value = false;
     _heartDuration = 0;
     danmakuController?.clear();
@@ -904,11 +965,41 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       else if (isLive)
         ...liveBuffer
       else
-        ...buffer,
+        ...Pref.initBuffer(
+          _playbackSpeed.value,
+          dataSource is NetworkSource ? dataSource.bandwidth : null,
+        ),
     };
 
     String video = dataSource.videoSource;
-    if (dataSource.audioSource case final audio? when (audio.isNotEmpty)) {
+    String? audioSource = dataSource.audioSource;
+    if (!isLive && dataSource is NetworkSource) {
+      final resolved = await _networkSession.resolve(
+        PlaybackNetworkSources(
+          video: video,
+          audio: audioSource,
+          videoCandidates: dataSource.videoCandidates ?? const [],
+          audioCandidates: dataSource.audioCandidates ?? const [],
+        ),
+        PlaybackNetworkOptions(
+          btrEnabled: Pref.threadRipperEnabled,
+          autoSelectCdn: Pref.directCdnAuto,
+          overseas: Pref.threadRipperOverseas,
+          autoConcurrency: Pref.threadRipperAutoConcurrency,
+          concurrency: Pref.threadRipperConcurrency,
+          audioFollowCdn: !Pref.disableAudioCDN,
+        ),
+      );
+      if (resolved == null ||
+          generation != _networkGeneration ||
+          _playerCount == 0) {
+        return;
+      }
+      video = resolved.video;
+      audioSource = resolved.audio;
+    }
+    if (generation != _networkGeneration || _playerCount == 0) return;
+    if (audioSource case final audio? when (audio.isNotEmpty)) {
       if (onlyPlayAudio.value) {
         video = audio;
       } else {
@@ -926,6 +1017,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
 
     assert(!isLive || seekTo == null);
+    _networkRestarting = true;
     await player.open(
       Media(
         video,
@@ -943,6 +1035,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (_videoPlayerController case final ctr? when (ctr.current.isNotEmpty)) {
       var media = ctr.current.last;
       if (!isLive) media = media.copyWith(start: ctr.state.position);
+      _networkRestarting = true;
       return ctr.open(media, play: true);
     }
     return null;
@@ -1007,6 +1100,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     assert(_subscriptions == null);
     final stream = player.stream;
     _subscriptions = [
+      Connectivity().onConnectivityChanged.listen(
+        (_) => _networkSession.selector.clear(),
+      ),
+
       /// playing
       stream.playing.listen((bool playing) {
         if (playing) {
@@ -1055,6 +1152,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
       /// position
       stream.position.listen((Duration position) {
+        _networkSession.autoConcurrency?.buffer(
+          (player.state.buffer - position).inMilliseconds / 1000,
+          player.state.playing && !_networkRestarting,
+          cacheFull: () => player.getProperty('demuxer-cache-idle') == 'yes',
+        );
         final posInSeconds = position.inSeconds;
 
         if (posInSeconds != this.position.value) {
@@ -1079,6 +1181,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         buffered.value = buffer.inSeconds;
       }),
       stream.buffering.listen((bool buffering) {
+        if (buffering &&
+            !isBuffering.value &&
+            !_networkRestarting &&
+            player.state.playing &&
+            player.state.position > Duration.zero) {
+          _networkSession.autoConcurrency?.stall();
+        }
+        if (!buffering) _networkRestarting = false;
         isBuffering.value = buffering;
         if (!playerStatus.isCompleted) {
           _stopWakeLockTimer();
@@ -1110,6 +1220,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           return;
         }
         if (event.startsWith("Failed to open https://") ||
+            event.startsWith("Failed to open http://127.0.0.1:") ||
             event.startsWith("Can not open external file https://") ||
             //tcp: ffurl_read returned 0xdfb9b0bb
             //tcp: ffurl_read returned 0xffffff99
@@ -1173,6 +1284,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       await _videoPlayerController?.stream.buffer.first;
     }
     danmakuController?.clear();
+    _networkRestarting = true;
     try {
       await _videoPlayerController?.seek(position);
       _updateIOSPip(position);
@@ -1211,6 +1323,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     await _videoPlayerController?.setRate(speed);
     if (!isLive) _playbackSpeed.value = speed;
+    if (_videoPlayerController case final NativePlayer player
+        when !isLive && dataSource is NetworkSource) {
+      final options = Pref.initBuffer(
+        speed,
+        (dataSource as NetworkSource).bandwidth,
+      );
+      for (final entry in options.entries) {
+        player.setProperty(entry.key, entry.value);
+      }
+    }
     _updatePlaybackState();
     if (danmakuController != null) {
       try {
@@ -1649,6 +1771,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
 
     _playerCount = 0;
+    _networkGeneration++;
+    _networkSettingsGeneration++;
+    _networkSession.dispose();
     if (removeSafeArea) {
       showSystemBar();
     }
