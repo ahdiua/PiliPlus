@@ -136,7 +136,10 @@ abstract final class Update {
                   downloadBtn('deb', ext: 'deb'),
                   downloadBtn('targz', ext: 'tar.gz'),
                 ] else
-                  downloadBtn('Github'),
+                  downloadBtn(
+                    '下载安装包',
+                    ext: Platform.isAndroid ? 'apk' : null,
+                  ),
               ],
             );
           },
@@ -148,35 +151,31 @@ abstract final class Update {
     }
   }
 
-  // 下载适用于当前系统的安装包
+  // 下载 fork Release 中适用于当前系统的安装包。
   static Future<void> onDownload(Map data, {String? ext}) async {
     SmartDialog.dismiss();
     try {
       void download(String plat) {
-        if (data['assets'].isNotEmpty) {
-          for (Map<String, dynamic> i in data['assets']) {
-            final String name = i['name'];
-            if (name.contains(plat) &&
-                (ext == null || ext.isEmpty ? true : name.endsWith(ext))) {
-              PageUtils.launchURL(i['browser_download_url']);
-              return;
-            }
+        for (Map<String, dynamic> asset in data['assets']) {
+          final String name = asset['name'];
+          if (name.contains(plat) &&
+              (ext == null || ext.isEmpty || name.endsWith('.$ext'))) {
+            PageUtils.launchURL(asset['browser_download_url']);
+            return;
           }
-          throw UnsupportedError('platform not found: $plat');
         }
+        throw UnsupportedError('platform not found: $plat');
       }
 
       if (Platform.isAndroid) {
-        // 获取设备信息
-        AndroidDeviceInfo androidInfo = await DeviceInfoPlugin().androidInfo;
-        // [arm64-v8a]
+        final androidInfo = await DeviceInfoPlugin().androidInfo;
         download(androidInfo.supportedAbis.first);
       } else {
         download(Platform.operatingSystem);
       }
     } catch (e) {
       if (kDebugMode) debugPrint('download error: $e');
-      PageUtils.launchURL('${Constants.releaseUrl}/releases/latest');
+      PageUtils.launchURL(Constants.latestReleaseUrl);
     }
   }
 }

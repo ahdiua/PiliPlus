@@ -1,7 +1,9 @@
 abstract final class Constants {
   static const appName = 'PiliPlus';
   static const sourceCodeUrl = 'https://github.com/bggRGjQaUbCoE/PiliPlus';
-  static const releaseUrl = 'https://github.com/ahdiua/PiliPlus';
+  static const releaseRepository = 'ahdiua/PiliPlus';
+  static const releaseUrl = 'https://github.com/$releaseRepository';
+  static const latestReleaseUrl = '$releaseUrl/releases/latest';
 
   // 27eb53fc9058f8c3  移动端 Android
   // 4409e2ce8ffd12b8  HD版

@@ -1,3 +1,4 @@
+import 'package:PiliPlus/common/constants.dart';
 import 'package:PiliPlus/http/constants.dart';
 
 abstract final class Api {
@@ -410,7 +411,7 @@ abstract final class Api {
 
   // github 获取最新版
   static const String latestApp =
-      'https://api.github.com/repos/ahdiua/PiliPlus/releases';
+      'https://api.github.com/repos/${Constants.releaseRepository}/releases';
 
   // 多少人在看
   // https://api.bilibili.com/x/player/online/total?aid=913663681&cid=1203559746&bvid=BV1MM4y1s7NZ&ts=56427838
