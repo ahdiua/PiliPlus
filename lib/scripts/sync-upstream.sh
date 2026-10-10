@@ -26,7 +26,7 @@ while IFS= read -r candidate; do
         exit 0
     fi
     tag="$candidate"
-done < <(git tag --points-at HEAD --list '*F*' --sort=version:refname)
+done < <(git tag --points-at HEAD --list '*F*' --exclude '*-pre' --exclude '*.preview-*' --sort=version:refname)
 
 if [[ -z "$tag" ]]; then
     version=$(sed -nE 's/^version: ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml)
@@ -34,7 +34,7 @@ if [[ -z "$tag" ]]; then
         echo '::error::Cannot determine version from pubspec.yaml.'
         exit 1
     fi
-    tag="${version}F.$(date -u +%Y%m%d%H%M%S).$(git rev-parse --short=9 HEAD)"
+    tag="${version}F.$(date -u +%Y%m%d%H%M%S)"
     git tag "$tag"
 fi
 
