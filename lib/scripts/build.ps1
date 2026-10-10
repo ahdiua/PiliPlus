@@ -7,6 +7,27 @@ try {
 
     $versionCode = [int](git rev-list --count HEAD).Trim()
 
+    $buildTime = [long]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+    if ($Arg -eq 'android') {
+        . (Join-Path $PSScriptRoot 'android-version.ps1')
+        $publishedCode = 0L
+        if ($env:GITHUB_ACTIONS -eq 'true') {
+            if ([string]::IsNullOrEmpty($env:GITHUB_REPOSITORY)) {
+                throw 'GITHUB_REPOSITORY is required for Android release builds'
+            }
+            $assetNames = gh api --paginate "repos/$env:GITHUB_REPOSITORY/releases" --jq '.[] | .assets[] | .name'
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Cannot determine published Android version codes'
+            }
+            foreach ($assetName in $assetNames) {
+                if ($assetName -match '\+(\d+)_arm64-v8a\.apk$') {
+                    $publishedCode = [Math]::Max($publishedCode, [long]$matches[1])
+                }
+            }
+        }
+        $versionCode = Get-AndroidVersionCode -UnixSeconds $buildTime -CommitCount $versionCode -PublishedCode $publishedCode
+    }
+
     $commitHash = (git rev-parse HEAD).Trim()
 
     $updatedContent = foreach ($line in (Get-Content -Path 'pubspec.yaml' -Encoding UTF8)) {
@@ -27,8 +48,6 @@ try {
     }
 
     $updatedContent | Set-Content -Path 'pubspec.yaml' -Encoding UTF8
-
-    $buildTime = [int]([DateTimeOffset]::Now.ToUnixTimeSeconds())
 
     $data = @{
         'pili.name' = $versionName
