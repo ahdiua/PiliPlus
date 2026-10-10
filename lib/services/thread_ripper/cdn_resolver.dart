@@ -18,6 +18,8 @@ class RipperCdnResolver {
     'upos-sz-mirroraliov.bilivideo.com',
     'cn-hk-eq-01-01.bilivideo.com',
     'cn-hk-eq-01-03.bilivideo.com',
+    'cn-fjfz-fx-01-01.bilivideo.com',
+    'upos-sz-mirror08h.bilivideo.com',
   ];
   static final _hosts = RegExp(
     r'(^|\.)(bilivideo\.(com|cn|net)|akamaized\.net|szbdyd\.com|hdslb\.com|xycdn\.com|mountaintoys\.cn|nexusedgeio\.com|ahdohpiechei\.com)$',

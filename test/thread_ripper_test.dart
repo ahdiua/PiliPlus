@@ -94,11 +94,19 @@ void main() {
           ...List<String>.from(rep['backupUrl']),
         ];
         final overseas = fixture['mode'] == 'overseas';
-        final urls = RipperCdnResolver.candidates(
-          originals,
-          overseas: overseas,
+        // Replay upstream traces with their original pool, even when the app
+        // adds CDN candidates. The current pool must retain those addresses.
+        final urls = (fixture['urls'] as List)
+            .cast<String>()
+            .map(Uri.parse)
+            .toList();
+        expect(
+          RipperCdnResolver.candidates(
+            originals,
+            overseas: overseas,
+          ).map((u) => u.toString()),
+          containsAll(fixture['urls']),
         );
-        expect(urls.map((u) => u.toString()).toList(), fixture['urls']);
         final resolver = RipperCdnResolver(
           urls,
           originals: originals.map(Uri.parse).toList(),
