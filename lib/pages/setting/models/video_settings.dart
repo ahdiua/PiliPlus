@@ -8,6 +8,7 @@ import 'package:PiliPlus/models/common/video/video_quality.dart';
 import 'package:PiliPlus/pages/setting/models/model.dart';
 import 'package:PiliPlus/pages/setting/widgets/ordered_multi_select_dialog.dart';
 import 'package:PiliPlus/pages/setting/widgets/select_dialog.dart';
+import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/audio_output_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/hwdec_type.dart';
 import 'package:PiliPlus/utils/filtering_text.dart';
@@ -67,6 +68,74 @@ List<SettingsModel> get videoSettings => [
     leading: const Icon(MdiIcons.cloudPlusOutline),
     getSubtitle: () => '当前使用：${Pref.liveCdnUrl ?? "默认"}',
     onTap: _showLiveCDNDialog,
+  ),
+  SwitchModel(
+    title: '直连 CDN 自动优选',
+    subtitle: '加载视频时小流量测速，选择单个节点播放；不修改已保存的 CDN',
+    leading: const Icon(Icons.speed_outlined),
+    setKey: SettingBoxKey.directCdnAuto,
+    onChanged: (_) =>
+        PlPlayerController.instance?.reloadNetworkSettings().ignore(),
+  ),
+  SwitchModel(
+    title: 'BTR 多线程加速',
+    subtitle: '自动并发多个 CDN；关闭后恢复原来的直连模式和 CDN 设置',
+    leading: const Icon(Icons.bolt_outlined),
+    setKey: SettingBoxKey.threadRipperEnabled,
+    onChanged: (_) =>
+        PlPlayerController.instance?.reloadNetworkSettings().ignore(),
+  ),
+  SwitchModel(
+    title: 'BTR 剧集加速',
+    subtitle: '对番剧等 DASH 视频启用加速，受保护或试看内容保持直连；下次加载生效',
+    leading: const Icon(Icons.movie_outlined),
+    setKey: SettingBoxKey.threadRipperEpisodeEnabled,
+    defaultVal: true,
+  ),
+  SwitchModel(
+    title: '加速使用海外 CDN',
+    subtitle: '用于自动优选和 BTR；关闭使用大陆节点',
+    leading: const Icon(Icons.public),
+    setKey: SettingBoxKey.threadRipperOverseas,
+    defaultVal: true,
+    onChanged: (_) =>
+        PlPlayerController.instance?.reloadNetworkSettings().ignore(),
+  ),
+  SwitchModel(
+    title: 'BTR 自动并发数',
+    subtitle: '根据缓冲和节点响应调整并发数，遇限流自动降低',
+    leading: const Icon(Icons.auto_awesome_outlined),
+    setKey: SettingBoxKey.threadRipperAutoConcurrency,
+    defaultVal: true,
+    onChanged: (_) =>
+        PlPlayerController.instance?.reloadNetworkSettings().ignore(),
+  ),
+  NormalModel(
+    title: 'BTR 手动并发数',
+    leading: const Icon(Icons.tune),
+    getSubtitle: () => Pref.threadRipperAutoConcurrency
+        ? '自动并发开启时不生效；手动设置为 ${Pref.threadRipperConcurrency}'
+        : '当前 ${Pref.threadRipperConcurrency}，音视频共享连接上限',
+    onTap: (context, setState) async {
+      final value = await showDialog<int>(
+        context: context,
+        builder: (_) => SelectDialog<int>(
+          title: 'BTR 手动并发数',
+          value: Pref.threadRipperConcurrency,
+          values: Pref.threadRipperConcurrencyValues
+              .map((n) => (n, '$n'))
+              .toList(),
+        ),
+      );
+      if (value != null) {
+        await GStorage.setting.put(
+          SettingBoxKey.threadRipperConcurrency,
+          value,
+        );
+        setState();
+        await PlPlayerController.instance?.reloadNetworkSettings();
+      }
+    },
   ),
   const SwitchModel(
     title: 'CDN 测速',
@@ -149,8 +218,17 @@ List<SettingsModel> get videoSettings => [
     title: '缓冲大小',
     leading: const Icon(Icons.storage_outlined),
     getSubtitle: () =>
-        '当前：${Pref.bufferSize}MB。同时为前向和后向缓冲区大小。对于直播流，无后向缓冲大小，全部转给前向（此选项即mpv的--demuxer-max-bytes，--demuxer-max-back-bytes）',
+        '当前：${Pref.bufferSize}MB。自动缓冲关闭时为前后向大小；开启时为前向缓存下限和后向大小。直播保持原设置',
     onTap: _showBufferSizeDialog,
+  ),
+  SwitchModel(
+    title: '按码率自动扩展缓冲',
+    subtitle: '兼顾码率、倍速和缓冲时长，自动扩展前向缓存至最高 64MB；保留手动设置',
+    leading: const Icon(Icons.storage_outlined),
+    setKey: SettingBoxKey.adaptivePlaybackBuffer,
+    defaultVal: true,
+    onChanged: (_) =>
+        PlPlayerController.instance?.reloadNetworkSettings().ignore(),
   ),
   NormalModel(
     title: '缓冲时长',
@@ -188,6 +266,7 @@ Future<void> _showCDNDialog(BuildContext context, VoidCallback setState) async {
     VideoUtils.cdnService = res;
     await GStorage.setting.put(SettingBoxKey.CDNService, res.name);
     setState();
+    await PlPlayerController.instance?.reloadNetworkSettings();
   }
 }
 

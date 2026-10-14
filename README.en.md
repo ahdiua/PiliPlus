@@ -26,6 +26,17 @@
 
 <br/>
 
+## BTR playback acceleration
+
+BTR (Bilibili-thread-ripper) playback acceleration from `feature/cdn-btr-acceleration` has been merged into `main`, using the existing media_kit/mpv player.
+
+- Enable “BTR 多线程加速” under Settings → Audio & video settings (disabled by default), or toggle it from the playback page's More menu. Audio and video share a connection budget, with automatic or manual concurrency settings.
+- Supports ordinary DASH videos and eligible episodes. Episode acceleration can be disabled separately; DRM and trial content, live streams, local files, and offline downloads retain their existing handling.
+- Uses the overseas CDN candidate pool by default, including education-network and Huawei cloud nodes, with an option to use mainland nodes. Disabling BTR resumes direct playback at the current position and preserves play/pause state and saved CDN settings.
+- Direct CDN auto-selection is available separately (disabled by default). Adaptive playback buffering is enabled by default and expands the forward cache based on bitrate, playback speed, and buffer duration while preserving manual buffer settings.
+
+See [CDN selection, playback buffering, and BTR](docs/thread-ripper.md) (Chinese) for settings, coverage, tests, and sources, and [NOTICE](NOTICE) for attribution and licensing.
+
 ## Download
 
 Download a build from [Releases](https://github.com/bggRGjQaUbCoE/PiliPlus/releases), or clone the repository and build it locally.

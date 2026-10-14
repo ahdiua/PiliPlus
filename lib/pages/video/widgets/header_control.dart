@@ -513,10 +513,32 @@ class HeaderControlState extends State<HeaderControl>
                 if (!isFileSource)
                   ListTile(
                     dense: true,
+                    title: const Text('BTR 多线程加速', style: titleStyle),
+                    leading: const Icon(Icons.bolt_outlined, size: 20),
+                    subtitle: const Text('并发多个 CDN，关闭恢复原来的单 CDN 设置'),
+                    trailing: Switch(
+                      value: Pref.threadRipperEnabled,
+                      onChanged: (value) async {
+                        Get.back();
+                        await setting.put(
+                          SettingBoxKey.threadRipperEnabled,
+                          value,
+                        );
+                        await plPlayerController.reloadNetworkSettings();
+                      },
+                    ),
+                  ),
+                if (!isFileSource)
+                  ListTile(
+                    dense: true,
                     title: const Text('CDN 设置', style: titleStyle),
                     leading: const Icon(MdiIcons.cloudPlusOutline, size: 20),
                     subtitle: Text(
-                      '当前：${VideoUtils.cdnService.desc}，无法播放请切换',
+                      Pref.threadRipperEnabled
+                          ? 'BTR 自动调度中；已保存的单 CDN：${VideoUtils.cdnService.desc}'
+                          : Pref.directCdnAuto
+                          ? '直连自动优选；已保存的单 CDN：${VideoUtils.cdnService.desc}'
+                          : '当前：${VideoUtils.cdnService.desc}，无法播放请切换',
                       style: subTitleStyle,
                     ),
                     onTap: () async {

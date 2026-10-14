@@ -1,0 +1,17 @@
+Network playback acceleration
+=============================
+
+The Range downloader, CDN resolver, automatic concurrency controller and their
+regression fixtures were adapted from lemonteaau/PiliPlus, commit
+257807d7ffc72df25e88340c8ee3bcecdb59264b:
+https://github.com/lemonteaau/PiliPlus
+
+This PiliPlus-derived implementation remains covered by the repository's
+GPL-3.0 license in LICENSE. The referenced Bilibili-thread-ripper algorithms
+are MIT licensed; their original notice is preserved in
+docs/licenses/bilibili-thread-ripper.txt.
+https://github.com/MrTangLuyao/Bilibili-thread-ripper
+
+This fork adds bounded single-CDN selection, bitrate-aware playback buffering,
+independent download sessions, and settings that retain the user's manual CDN
+selection when BTR is disabled.
