@@ -20,6 +20,7 @@ jobs:
         outputs:
             tag: ${{ steps.sync.outputs.tag }}
             ref: ${{ steps.sync.outputs.ref }}
+            prerelease: ${{ steps.sync.outputs.prerelease }}
         steps:
             - uses: actions/checkout@v7
               with:
@@ -30,6 +31,7 @@ jobs:
               env:
                   GH_TOKEN: ${{ github.token }}
                   GH_REPO: ${{ github.repository }}
+                  SYNC_EVENT_NAME: ${{ github.event_name }}
               shell: bash
               run: bash lib/scripts/sync-upstream.sh
 
@@ -40,4 +42,5 @@ jobs:
         with:
             tag: ${{ needs.sync.outputs.tag }}
             ref: ${{ needs.sync.outputs.ref }}
+            prerelease: ${{ needs.sync.outputs.prerelease == 'true' }}
         secrets: inherit

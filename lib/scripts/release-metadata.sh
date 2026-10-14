@@ -1,27 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-commit=$(git rev-parse HEAD)
-tag=${RELEASE_INPUT_TAG:-${GITHUB_REF_NAME}}
-name="$tag"
-prerelease=false
+: "${RELEASE_INPUT_TAG:?Release tag is required}"
+: "${RELEASE_PRERELEASE:?Release channel is required}"
 
-# Branch pushes publish previews. Tagged and daily main releases stay stable.
-if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_TYPE" == branch && "$GITHUB_REF_NAME" != main ]]; then
-    version=$(sed -nE 's/^version: ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml)
-    if [[ -z "$version" ]]; then
-        echo '::error::Cannot determine release version from pubspec.yaml.'
-        exit 1
-    fi
-    tag="${version}F.$(date -u +%Y%m%d%H%M%S)-pre"
-    name="$tag (${GITHUB_REF_NAME})"
-    prerelease=true
+case "$RELEASE_PRERELEASE" in
+    true|false) ;;
+    *) echo '::error::Invalid release channel.'; exit 1 ;;
+esac
+if [[ "$RELEASE_PRERELEASE" == true && "$RELEASE_INPUT_TAG" != *-pre ]] ||
+   [[ "$RELEASE_PRERELEASE" == false && ("$RELEASE_INPUT_TAG" == *-pre || "$RELEASE_INPUT_TAG" == *.preview-* || "$RELEASE_INPUT_TAG" == preview-*) ]]; then
+    echo '::error::Release tag does not match its channel.'
+    exit 1
 fi
 
-# A preview tag pushed manually must remain a prerelease as well.
-if [[ "$tag" == *-pre || "$tag" == *.preview-* || "$tag" == preview-* ]]; then
-    prerelease=true
+commit=$(git rev-parse HEAD)
+if [[ "$(git rev-parse "$RELEASE_INPUT_TAG^{commit}")" != "$commit" ]]; then
+    echo '::error::Release tag does not point to the checked-out commit.'
+    exit 1
 fi
 
 printf 'tag=%s\nname=%s\nprerelease=%s\ncommit=%s\n' \
-    "$tag" "$name" "$prerelease" "$commit" >> "$GITHUB_OUTPUT"
+    "$RELEASE_INPUT_TAG" "$RELEASE_INPUT_TAG" "$RELEASE_PRERELEASE" "$commit" >> "$GITHUB_OUTPUT"

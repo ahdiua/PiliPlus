@@ -28,43 +28,44 @@ abstract final class Update {
           extra: {'account': const NoAccount()},
         ),
       );
-      if (res.data is! List || res.data.isEmpty) {
+      if (res.statusCode == 404) {
+        if (!isAuto) SmartDialog.showToast('暂无可用的正式版本');
+        return;
+      }
+      if (res.statusCode != 200) {
+        if (!isAuto) SmartDialog.showToast('检查更新失败，请检查 GitHub 网络连接');
+        return;
+      }
+      if (res.data is! Map || res.data.isEmpty) {
         if (!isAuto) {
           SmartDialog.showToast('检查更新失败，GitHub接口未返回数据，请检查网络');
         }
         return;
       }
-      // Ignore drafts, prereleases, and releases without an installable APK.
-      final releases = (res.data as List).where(
-        (data) =>
-            data['draft'] != true &&
-            data['prerelease'] != true &&
-            (!Platform.isAndroid ||
-                (data['assets'] as List).any(
-                  (asset) => (asset['name'] as String).endsWith(
-                    '_arm64-v8a.apk',
-                  ),
-                )),
-      );
-      if (releases.isEmpty) {
-        if (!isAuto) SmartDialog.showToast('暂无可用的新版本');
+      // /latest returns the official release; reject unexpected preview data.
+      final data = res.data as Map;
+      if (data['draft'] != false ||
+          data['prerelease'] != false ||
+          data['assets'] is! List ||
+          (Platform.isAndroid &&
+              !(data['assets'] as List).any(
+                (asset) => (asset['name'] as String).endsWith('_arm64-v8a.apk'),
+              ))) {
+        if (!isAuto) SmartDialog.showToast('暂无可用的正式版本');
         return;
       }
-      final data = releases.first;
       int? latestCode;
       for (final asset in data['assets'] as List) {
-        final match = RegExp(
-          r'\+(\d+)_arm64-v8a\.apk$',
-        ).firstMatch(asset['name'] as String);
+        final match = RegExp(r'\+(\d+)_arm64-v8a\.apk$')
+            .firstMatch(asset['name'] as String);
         if (match != null) {
           latestCode = int.parse(match.group(1)!);
           break;
         }
       }
       final latestTime =
-          DateTime.parse(
-            data['published_at'] ?? data['created_at'],
-          ).millisecondsSinceEpoch ~/
+          DateTime.parse(data['published_at'] ?? data['created_at'])
+              .millisecondsSinceEpoch ~/
           1000;
       final isLatest = latestCode != null && Platform.isAndroid
           ? BuildConfig.versionCode >= latestCode
@@ -136,10 +137,7 @@ abstract final class Update {
                   downloadBtn('deb', ext: 'deb'),
                   downloadBtn('targz', ext: 'tar.gz'),
                 ] else
-                  downloadBtn(
-                    '下载安装包',
-                    ext: Platform.isAndroid ? 'apk' : null,
-                  ),
+                  downloadBtn('下载安装包', ext: Platform.isAndroid ? 'apk' : null),
               ],
             );
           },
