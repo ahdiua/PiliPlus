@@ -130,7 +130,7 @@ source "$TEST_SCRIPT"
     def test_daily_merges_only_official_tag_and_preserves_fork(self):
         data = self.successful_sync()
         self.assertEqual(data["prerelease"], "false")
-        self.assertEqual(data["tag"], "2.1.6F.20261014000000")
+        self.assertEqual(data["tag"], "v2.1.6F")
         self.assertTrue((self.fork / "stable.txt").exists())
         self.assertTrue((self.fork / "fork.txt").exists())
         self.assertFalse((self.fork / "development.txt").exists())
@@ -162,7 +162,40 @@ source "$TEST_SCRIPT"
         new = self.successful_sync(UPSTREAM_TAG="v2.1.7", PUBLISHED_TAGS=old["tag"],
                                    TEST_TIME="20261015000000")
         self.assertNotEqual(new["tag"], old["tag"])
+        self.assertEqual(new["tag"], "v2.1.7F")
         self.assertTrue((self.fork / "development.txt").exists())
+
+    def test_official_tag_preserves_all_upstream_version_parts(self):
+        self.git("tag", "-a", "2.1.6.2", "-m", "four-part stable", self.stable,
+                 cwd=self.upstream)
+        data = self.successful_sync(UPSTREAM_TAG="2.1.6.2")
+        self.assertEqual(data["tag"], "2.1.6.2F")
+        self.assertFalse((self.fork / "development.txt").exists())
+
+    def test_legacy_published_timestamp_tag_is_not_republished(self):
+        legacy = "2.1.6F.20261015013225"
+        self.git("tag", "-a", legacy, "-m", f"Upstream release: {UPSTREAM}@v2.1.6")
+        data = self.successful_sync(PUBLISHED_TAGS=legacy)
+        self.assertEqual(data, {})
+        self.assertEqual(self.git("tag", "--list", "v2.1.6F"), "")
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
+
+    def test_incomplete_legacy_timestamp_release_reuses_tag_and_commit(self):
+        legacy = "2.1.6F.20261015013225"
+        self.git("tag", "-a", legacy, "-m", f"Upstream release: {UPSTREAM}@v2.1.6")
+        self.successful_sync("workflow_dispatch", TEST_TIME="20261015020000")
+        data = self.successful_sync()
+        self.assertEqual(data, {"tag": legacy, "ref": self.initial, "prerelease": "false"})
+        self.assertEqual(self.git("tag", "--list", "v2.1.6F"), "")
+
+    def test_existing_unrelated_release_tag_is_not_overwritten(self):
+        self.git("tag", "-a", "v2.1.6F", "-m", "unrelated tag")
+        result, data = self.sync()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing to overwrite", result.stdout)
+        self.assertEqual(data, {})
+        self.assertEqual(self.git("rev-parse", "v2.1.6F^{commit}"), self.initial)
+        self.assertEqual(self.git("rev-parse", "main", cwd=self.remote), self.initial)
 
     def test_manual_merges_development_and_publishes_preview(self):
         data = self.successful_sync("workflow_dispatch", API_ERROR="500")

@@ -77,13 +77,21 @@ if ! git merge --no-edit "$upstream_commit"; then
     exit 1
 fi
 
-version=$(sed -nE 's/^version: ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml)
-if [[ -z "$version" ]]; then
-    echo '::error::Cannot determine version from pubspec.yaml.'
+if [[ "$prerelease" == true ]]; then
+    version=$(sed -nE 's/^version: ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml)
+    if [[ -z "$version" ]]; then
+        echo '::error::Cannot determine version from pubspec.yaml.'
+        exit 1
+    fi
+    tag="${version}F.$(date -u +%Y%m%d%H%M%S)-pre"
+else
+    # Preserve the upstream release tag exactly, including v and extra parts.
+    tag="${upstream_tag}F"
+fi
+if git show-ref --verify --quiet "refs/tags/$tag"; then
+    echo "::error::Tag $tag already exists without matching upstream release metadata; refusing to overwrite it."
     exit 1
 fi
-tag="${version}F.$(date -u +%Y%m%d%H%M%S)"
-if [[ "$prerelease" == true ]]; then tag+="-pre"; fi
 git tag -a "$tag" -m "$tag_message"
 release_commit=$(git rev-parse HEAD)
 

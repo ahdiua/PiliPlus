@@ -41,7 +41,7 @@ See [CDN selection, playback buffering, and BTR](docs/thread-ripper.md) (Chinese
 
 Download a build from [Releases](https://github.com/bggRGjQaUbCoE/PiliPlus/releases), or clone the repository and build it locally.
 
-This fork's in-app update checks use only the [latest official release](https://github.com/ahdiua/PiliPlus/releases/latest). The daily workflow merges a new upstream official Release tag into `main` and publishes an official build. Manually run **Sync upstream and release** in Actions to merge upstream development commits and publish a prerelease. Ordinary pushes do not publish builds. See the [release policy](docs/releases.md) (Chinese).
+This fork's in-app update checks use only the [latest official release](https://github.com/ahdiua/PiliPlus/releases/latest). The daily workflow merges a new upstream official Release tag into `main` and publishes an official build, with `F` appended to the original upstream tag (for example, `2.1.6.2F`). Manually run **Sync upstream and release** in Actions to merge upstream development commits and publish a prerelease. Ordinary pushes do not publish builds. See the [release policy](docs/releases.md) (Chinese).
 
 ## Disclaimer
 
