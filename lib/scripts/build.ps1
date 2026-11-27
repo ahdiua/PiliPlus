@@ -47,10 +47,22 @@ try {
         throw 'version not found'
     }
 
+    # A release shows its tag, e.g. 2.2.1F.1, which tells the fork's releases
+    # of one upstream version apart. pubspec.yaml and the APK file name keep
+    # the semver version: Flutter needs it, and update checks read the
+    # versionCode from the file name.
+    $displayName = $versionName
+    if (-not [string]::IsNullOrEmpty($env:RELEASE_TAG)) {
+        $displayName = $env:RELEASE_TAG
+        if ($Arg -eq 'android') {
+            $displayName += '-' + $commitHash.Substring(0, 9)
+        }
+    }
+
     $updatedContent | Set-Content -Path 'pubspec.yaml' -Encoding UTF8
 
     $data = @{
-        'pili.name' = $versionName
+        'pili.name' = $displayName
         'pili.code' = $versionCode
         'pili.hash' = $commitHash
         'pili.time' = $buildTime

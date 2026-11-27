@@ -1,0 +1,45 @@
+name: Release
+
+# Pushing a tag releases the commit it points to: <upstream version>F, then an
+# optional fork release number, and -pre for a prerelease, for example 2.2.1F,
+# 2.2.1F.1 or 2.2.1F.2-pre. These filters only select candidates;
+# lib/scripts/release-tag.sh checks the exact form, that the version matches
+# pubspec.yaml, and that the commit is on main. See docs/releases.md.
+on:
+    push:
+        tags:
+            - '*F'
+            - '*F.*'
+            - '*F-pre'
+
+permissions:
+    contents: write
+
+jobs:
+    tag:
+        if: github.repository == 'ahdiua/PiliPlus'
+        runs-on: ubuntu-latest
+        outputs:
+            tag: ${{ steps.tag.outputs.tag }}
+            ref: ${{ steps.tag.outputs.ref }}
+            prerelease: ${{ steps.tag.outputs.prerelease }}
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  # All branches and tags, to check the commit is on main.
+                  fetch-depth: 0
+            - name: Check release tag
+              id: tag
+              env:
+                  RELEASE_TAG: ${{ github.ref_name }}
+              shell: bash
+              run: bash lib/scripts/release-tag.sh
+
+    release:
+        needs: tag
+        uses: ./.github/workflows/build.yml
+        with:
+            tag: ${{ needs.tag.outputs.tag }}
+            ref: ${{ needs.tag.outputs.ref }}
+            prerelease: ${{ needs.tag.outputs.prerelease == 'true' }}
+        secrets: inherit

@@ -1,28 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${GH_REPO:?Fork repository is required}"
-: "${SYNC_EVENT_NAME:?Sync event is required}"
+# Merges upstream into main and pushes main. It never tags or releases: a
+# release is a tag pushed by hand (see docs/releases.md and release-tag.sh).
+#   SYNC_SOURCE=release  the commit of upstream's latest full release
+#   SYNC_SOURCE=main     upstream's latest main commit
+: "${SYNC_SOURCE:?Sync source is required}"
 upstream_repo='bggRGjQaUbCoE/PiliPlus'
-prerelease=false
+upstream_url="https://github.com/$upstream_repo.git"
 
 git config user.name 'github-actions[bot]'
 git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-prepare_output() {
-    printf 'tag=%s\nref=%s\nprerelease=%s\n' "$tag" "$release_commit" "$prerelease" >> "$GITHUB_OUTPUT"
-    printf 'Prepared %s at %s for ARM64 build and release.\n' "$tag" "$release_commit" >> "$GITHUB_STEP_SUMMARY"
+version_of() {
+    sed -nE 's/^version: ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml
 }
 
-case "$SYNC_EVENT_NAME" in
-    workflow_dispatch)
-        prerelease=true
-        git fetch --no-tags "https://github.com/$upstream_repo.git" main
-        upstream_commit=$(git rev-parse FETCH_HEAD)
-        tag_message="Upstream preview: $upstream_repo@$upstream_commit"
-        ;;
-    schedule)
-        # Only published full releases qualify, never an un-released Git tag.
+case "$SYNC_SOURCE" in
+    release)
+        # Only a published full release qualifies, never an un-released Git tag.
         api_error=$(mktemp)
         trap 'rm -f "$api_error"' EXIT
         if ! upstream_tag=$(gh api "repos/$upstream_repo/releases/latest" --jq \
@@ -38,63 +34,37 @@ case "$SYNC_EVENT_NAME" in
             echo 'Upstream has no official release yet.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
         fi
-        tag_message="Upstream release: $upstream_repo@$upstream_tag"
-
-        # Annotated fork tags track the upstream release across later main
-        # commits and manual previews. An incomplete build reuses its tag/SHA.
-        published_tags=$(gh api --paginate "repos/$GH_REPO/releases" --jq \
-            '.[] | select(.draft == false and .prerelease == false) | select(any(.assets[]; .state == "uploaded" and .size > 0 and (.name | endswith("_arm64-v8a.apk")))) | .tag_name')
-        tag=''
-        candidates=$(git tag --list '*F*' --sort=version:refname)
-        while IFS= read -r candidate; do
-            [[ -n "$candidate" ]] || continue
-            case "$candidate" in
-                *-pre|*.preview-*|preview-*) continue ;;
-            esac
-            if [[ "$(git for-each-ref --format='%(contents:subject)' "refs/tags/$candidate")" == "$tag_message" ]]; then
-                if printf '%s\n' "$published_tags" | grep -Fxq -- "$candidate"; then
-                    echo "Upstream release $upstream_tag is already published." >> "$GITHUB_STEP_SUMMARY"
-                    exit 0
-                fi
-                tag="$candidate"
-            fi
-        done <<< "$candidates"
-        if [[ -n "$tag" ]]; then
-            release_commit=$(git rev-parse "$tag^{commit}")
-            prepare_output
-            exit 0
-        fi
-
-        git fetch --no-tags "https://github.com/$upstream_repo.git" "refs/tags/$upstream_tag"
+        git fetch --no-tags "$upstream_url" "refs/tags/$upstream_tag"
         upstream_commit=$(git rev-parse 'FETCH_HEAD^{commit}')
+        label="release $upstream_repo@$upstream_tag"
+        suggestion="${upstream_tag}F"
+        if git rev-parse --verify --quiet "refs/tags/$suggestion" > /dev/null; then
+            suggestion="$suggestion.<n>"
+        fi
         ;;
-    *) echo '::error::Only scheduled or manual syncs are supported.'; exit 1 ;;
+    main)
+        git fetch --no-tags "$upstream_url" main
+        upstream_commit=$(git rev-parse FETCH_HEAD)
+        label="$upstream_repo@main ${upstream_commit:0:9}"
+        suggestion=''
+        ;;
+    *)
+        echo "::error::Unknown sync source: $SYNC_SOURCE"
+        exit 1
+        ;;
 esac
 
-if ! git merge --no-edit "$upstream_commit"; then
+if git merge-base --is-ancestor "$upstream_commit" HEAD; then
+    echo "main already contains upstream $label." >> "$GITHUB_STEP_SUMMARY"
+    exit 0
+fi
+if ! git merge --no-edit -m "Merge upstream $label" "$upstream_commit"; then
     git merge --abort
-    echo '::error::Upstream merge conflicts with fork changes. Resolve the conflicts on main, then rerun this workflow.'
+    echo '::error::Upstream merge conflicts with fork changes. Merge it locally, resolve the conflicts and push main.'
     exit 1
 fi
+git push origin HEAD:refs/heads/main
 
-if [[ "$prerelease" == true ]]; then
-    version=$(sed -nE 's/^version: ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml)
-    if [[ -z "$version" ]]; then
-        echo '::error::Cannot determine version from pubspec.yaml.'
-        exit 1
-    fi
-    tag="${version}F.$(date -u +%Y%m%d%H%M%S)-pre"
-else
-    # Preserve the upstream release tag exactly, including v and extra parts.
-    tag="${upstream_tag}F"
-fi
-if git show-ref --verify --quiet "refs/tags/$tag"; then
-    echo "::error::Tag $tag already exists without matching upstream release metadata; refusing to overwrite it."
-    exit 1
-fi
-git tag -a "$tag" -m "$tag_message"
-release_commit=$(git rev-parse HEAD)
-
-# The reusable build publishes this exact commit. Normal pushes never publish.
-git push --atomic origin HEAD:refs/heads/main "refs/tags/$tag"
-prepare_output
+[[ -n "$suggestion" ]] || suggestion="$(version_of)F.<n>"
+printf 'Merged upstream %s into main at %s. Nothing was released: push a tag such as %s to release it.\n' \
+    "$label" "$(git rev-parse --short HEAD)" "$suggestion" >> "$GITHUB_STEP_SUMMARY"

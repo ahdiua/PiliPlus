@@ -1,7 +1,11 @@
-"""Exercise release scripts against disposable local Git repositories.
+"""Exercise the release scripts against disposable local Git repositories.
 
 Run with Python 3 and Git Bash installed. Git merges, tags, and pushes are real;
 only GitHub API responses and the upstream fetch URL are replaced with fixtures.
+
+Releases are tags pushed by hand (lib/scripts/release-tag.sh); syncing upstream
+(lib/scripts/sync-upstream.sh) only merges and pushes main. See
+docs/releases.md.
 """
 
 import os
@@ -68,6 +72,7 @@ class ReleasePolicyTest(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-m", "fork feature")
         self.git("push", "origin", "main")
+        self.git("fetch", "origin")
         self.initial = self.git("rev-parse", "HEAD")
         self.output = self.path / "output.txt"
         self.summary = self.path / "summary.txt"
@@ -85,40 +90,43 @@ gh() {
     if [[ "$*" != *'draft == false and .prerelease == false'* ]]; then
         echo 'Missing full-release filter' >&2; return 1
     fi
-    if [[ "$*" == *'/releases/latest'* ]]; then
+    if [[ "$*" == *'repos/bggRGjQaUbCoE/PiliPlus/releases/latest'* ]]; then
         if [[ -n "${API_ERROR:-}" ]]; then
             echo "gh: fixture error (HTTP $API_ERROR)" >&2; return 1
         fi
         printf '%s\n' "$UPSTREAM_TAG"
-    elif [[ "$*" == *'repos/test/fork/releases'* ]]; then
-        printf '%s\n' "${PUBLISHED_TAGS:-}"
     else
         echo 'Unexpected API request' >&2; return 1
     fi
 }
-date() { printf '%s\n' "$TEST_TIME"; }
 source "$TEST_SCRIPT"
 ''', encoding="utf-8", newline="\n")
-        self.env.update(TEST_UPSTREAM=self.upstream.as_posix(), GH_REPO="test/fork",
-                        UPSTREAM_TAG="v2.1.6", TEST_TIME="20261014000000",
+        self.env.update(TEST_UPSTREAM=self.upstream.as_posix(), UPSTREAM_TAG="v2.1.6",
                         GITHUB_OUTPUT=self.output.as_posix(),
                         GITHUB_STEP_SUMMARY=self.summary.as_posix())
 
-    def sync(self, event="schedule", **extra):
+    def run_script(self, script, **extra):
         self.output.write_text("")
         self.summary.write_text("")
-        env = dict(self.env, SYNC_EVENT_NAME=event,
-                   TEST_SCRIPT=(ROOT / "lib/scripts/sync-upstream.sh").as_posix(),
+        env = dict(self.env, TEST_SCRIPT=(ROOT / "lib/scripts" / script).as_posix(),
                    **extra)
         result = subprocess.run([BASH, self.runner.as_posix()], cwd=self.fork,
                                 env=env, text=True, capture_output=True)
         data = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
         return result, data
 
+    def sync(self, source="release", **extra):
+        return self.run_script("sync-upstream.sh", SYNC_SOURCE=source, **extra)
+
     def successful_sync(self, *args, **kwargs):
         result, data = self.sync(*args, **kwargs)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        return data
+        # Syncing never hands a release to the build.
+        self.assertEqual(data, {})
+        return self.summary.read_text()
+
+    def release_tag(self, tag):
+        return self.run_script("release-tag.sh", RELEASE_TAG=tag)
 
     def metadata(self, tag, channel):
         self.output.write_text("")
@@ -127,127 +135,143 @@ source "$TEST_SCRIPT"
                                 cwd=self.fork, env=env, text=True, capture_output=True)
         return result, self.output.read_text()
 
-    def test_daily_merges_only_official_tag_and_preserves_fork(self):
-        data = self.successful_sync()
-        self.assertEqual(data["prerelease"], "false")
-        self.assertEqual(data["tag"], "v2.1.6F")
+    def remote_main(self):
+        return self.git("rev-parse", "main", cwd=self.remote)
+
+    def release_tags(self):
+        return self.git("tag", "--list", "*F*")
+
+    # Syncing upstream
+
+    def test_release_source_merges_only_the_official_tag_and_pushes_main(self):
+        summary = self.successful_sync()
         self.assertTrue((self.fork / "stable.txt").exists())
         self.assertTrue((self.fork / "fork.txt").exists())
         self.assertFalse((self.fork / "development.txt").exists())
-        self.assertEqual(self.git("rev-parse", f'{data["tag"]}^{{commit}}'), data["ref"])
-        self.assertEqual(self.git("rev-parse", "main", cwd=self.remote), data["ref"])
-        result, metadata = self.metadata(data["tag"], "false")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("prerelease=false\n", metadata)
+        self.assertEqual(self.remote_main(), self.git("rev-parse", "HEAD"))
+        self.assertIn(f"{UPSTREAM}@v2.1.6", self.git("log", "-1", "--format=%s"))
+        self.assertEqual(self.release_tags(), "")
+        self.assertIn("push a tag such as v2.1.6F ", summary)
 
-    def test_daily_skips_published_tag_after_manual_preview(self):
-        stable = self.successful_sync()
-        self.successful_sync("workflow_dispatch", TEST_TIME="20261014000100")
-        before = self.git("rev-parse", "HEAD")
-        data = self.successful_sync(PUBLISHED_TAGS=stable["tag"])
-        self.assertEqual(data, {})
-        self.assertEqual(self.git("rev-parse", "HEAD"), before)
+    def test_release_source_suggests_a_fork_number_after_a_release(self):
+        self.git("tag", "v2.1.6F")
+        summary = self.successful_sync()
+        self.assertIn("push a tag such as v2.1.6F.<n> ", summary)
 
-    def test_failed_stable_build_retries_original_tag_and_commit(self):
-        stable = self.successful_sync()
-        self.successful_sync("workflow_dispatch", TEST_TIME="20261014000100")
-        before = self.git("rev-parse", "HEAD")
-        retry = self.successful_sync(TEST_TIME="20261015000000")
-        self.assertEqual(retry, stable)
-        self.assertEqual(self.git("rev-parse", "HEAD"), before)
-
-    def test_new_official_tag_publishes_after_previous_success(self):
-        old = self.successful_sync()
-        self.git("tag", "-a", "v2.1.7", "-m", "next stable", cwd=self.upstream)
-        new = self.successful_sync(UPSTREAM_TAG="v2.1.7", PUBLISHED_TAGS=old["tag"],
-                                   TEST_TIME="20261015000000")
-        self.assertNotEqual(new["tag"], old["tag"])
-        self.assertEqual(new["tag"], "v2.1.7F")
+    def test_main_source_merges_upstream_development(self):
+        summary = self.successful_sync("main")
         self.assertTrue((self.fork / "development.txt").exists())
+        self.assertTrue((self.fork / "fork.txt").exists())
+        self.assertEqual(self.remote_main(), self.git("rev-parse", "HEAD"))
+        self.assertEqual(self.release_tags(), "")
+        self.assertIn("push a tag such as 2.1.6F.<n> ", summary)
 
-    def test_official_tag_preserves_all_upstream_version_parts(self):
-        self.git("tag", "-a", "2.1.6.2", "-m", "four-part stable", self.stable,
-                 cwd=self.upstream)
-        data = self.successful_sync(UPSTREAM_TAG="2.1.6.2")
-        self.assertEqual(data["tag"], "2.1.6.2F")
-        self.assertFalse((self.fork / "development.txt").exists())
-
-    def test_legacy_published_timestamp_tag_is_not_republished(self):
-        legacy = "2.1.6F.20261015013225"
-        self.git("tag", "-a", legacy, "-m", f"Upstream release: {UPSTREAM}@v2.1.6")
-        data = self.successful_sync(PUBLISHED_TAGS=legacy)
-        self.assertEqual(data, {})
-        self.assertEqual(self.git("tag", "--list", "v2.1.6F"), "")
-        self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
-
-    def test_incomplete_legacy_timestamp_release_reuses_tag_and_commit(self):
-        legacy = "2.1.6F.20261015013225"
-        self.git("tag", "-a", legacy, "-m", f"Upstream release: {UPSTREAM}@v2.1.6")
-        self.successful_sync("workflow_dispatch", TEST_TIME="20261015020000")
-        data = self.successful_sync()
-        self.assertEqual(data, {"tag": legacy, "ref": self.initial, "prerelease": "false"})
-        self.assertEqual(self.git("tag", "--list", "v2.1.6F"), "")
-
-    def test_existing_unrelated_release_tag_is_not_overwritten(self):
-        self.git("tag", "-a", "v2.1.6F", "-m", "unrelated tag")
-        result, data = self.sync()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("refusing to overwrite", result.stdout)
-        self.assertEqual(data, {})
-        self.assertEqual(self.git("rev-parse", "v2.1.6F^{commit}"), self.initial)
-        self.assertEqual(self.git("rev-parse", "main", cwd=self.remote), self.initial)
-
-    def test_manual_merges_development_and_publishes_preview(self):
-        data = self.successful_sync("workflow_dispatch", API_ERROR="500")
-        self.assertEqual(data["prerelease"], "true")
-        self.assertTrue(data["tag"].endswith("-pre"))
-        self.assertTrue((self.fork / "development.txt").exists())
-        result, metadata = self.metadata(data["tag"], "true")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("prerelease=true\n", metadata)
+    def test_merged_upstream_is_not_merged_again(self):
+        self.successful_sync()
+        before = self.git("rev-parse", "HEAD")
+        summary = self.successful_sync()
+        self.assertIn("already contains", summary)
+        self.assertEqual(self.git("rev-parse", "HEAD"), before)
+        self.assertEqual(self.remote_main(), before)
 
     def test_no_official_release_does_nothing(self):
         for extra in ({"API_ERROR": "404"}, {"UPSTREAM_TAG": ""}):
             with self.subTest(extra=extra):
-                self.assertEqual(self.successful_sync(**extra), {})
+                self.successful_sync(**extra)
                 self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
-                self.assertEqual(self.git("tag", "--list", "*F*"), "")
+                self.assertEqual(self.remote_main(), self.initial)
 
-    def test_api_failure_stops_without_merge_or_tag(self):
+    def test_api_failure_stops_without_merge(self):
         result, data = self.sync(API_ERROR="403")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(data, {})
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
+        self.assertEqual(self.remote_main(), self.initial)
 
-    def test_merge_conflict_does_not_push_or_tag(self):
+    def test_merge_conflict_does_not_push(self):
         (self.fork / "stable.txt").write_text("conflicting fork change\n")
         self.git("add", ".")
         self.git("commit", "-m", "fork conflict")
         before = self.git("rev-parse", "HEAD")
         result, data = self.sync()
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("conflicts", result.stdout)
         self.assertEqual(data, {})
         self.assertEqual(self.git("rev-parse", "HEAD"), before)
         self.assertEqual(self.git("status", "--porcelain"), "")
-        self.assertEqual(self.git("rev-parse", "main", cwd=self.remote), self.initial)
-        self.assertEqual(self.git("tag", "--list", "*F*"), "")
+        self.assertEqual(self.remote_main(), self.initial)
 
-    def test_unexpected_event_cannot_publish(self):
-        result, data = self.sync("push")
+    def test_unknown_source_fails(self):
+        result, data = self.sync("schedule")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(data, {})
-        self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
+        self.assertEqual(self.remote_main(), self.initial)
+
+    # Releasing a pushed tag
+
+    def test_release_tag_forms_and_channels(self):
+        for tag, prerelease in (("2.1.6F", "false"), ("2.1.6F.1", "false"),
+                                ("2.1.6.2F.3", "false"), ("v2.1.6F.12", "false"),
+                                ("2.1.6F-pre", "true"), ("2.1.6F.2-pre", "true")):
+            with self.subTest(tag=tag):
+                self.git("tag", tag)
+                result, data = self.release_tag(tag)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(data, {"tag": tag, "ref": self.initial,
+                                        "prerelease": prerelease})
+
+    def test_release_tag_rejects_other_forms(self):
+        for tag in ("2.1.6", "2.1.6.1", "2.1.6F.0", "2.1.6F.01", "2.1.6F1",
+                    "2.1.6-pre", "2.1.6F.1-beta", "F2.1.6", "2.1.6F.1.2"):
+            with self.subTest(tag=tag):
+                self.git("tag", tag)
+                result, data = self.release_tag(tag)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("is not <upstream version>F", result.stdout)
+                self.assertEqual(data, {})
+
+    def test_release_tag_must_match_pubspec(self):
+        self.git("tag", "2.1.7F.1")
+        result, data = self.release_tag("2.1.7F.1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pubspec.yaml", result.stdout)
+        self.assertEqual(data, {})
+
+    def test_release_tag_must_be_on_main(self):
+        self.git("switch", "-c", "side")
+        (self.fork / "side.txt").write_text("not on main\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "side")
+        self.git("tag", "2.1.6F.1")
+        result, data = self.release_tag("2.1.6F.1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not on main", result.stdout)
+        self.assertEqual(data, {})
+
+    def test_missing_release_tag_fails(self):
+        result, data = self.release_tag("2.1.6F.9")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not exist", result.stdout)
+        self.assertEqual(data, {})
 
     def test_metadata_rejects_channel_mismatch_and_wrong_commit(self):
-        stable = self.successful_sync()
-        result, output = self.metadata(stable["tag"], "true")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(output, "")
-        preview = self.successful_sync("workflow_dispatch", TEST_TIME="20261014000100")
-        result, output = self.metadata(preview["tag"], "false")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(output, "")
-        result, output = self.metadata(stable["tag"], "false")
+        self.git("tag", "2.1.6F.1")
+        self.git("tag", "2.1.6F.2-pre")
+        result, output = self.metadata("2.1.6F.1", "false")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("prerelease=false\n", output)
+        result, output = self.metadata("2.1.6F.2-pre", "true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("prerelease=true\n", output)
+        for tag, channel in (("2.1.6F.1", "true"), ("2.1.6F.2-pre", "false")):
+            with self.subTest(tag=tag, channel=channel):
+                result, output = self.metadata(tag, channel)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(output, "")
+        (self.fork / "later.txt").write_text("later\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "later")
+        result, output = self.metadata("2.1.6F.1", "false")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(output, "")
 

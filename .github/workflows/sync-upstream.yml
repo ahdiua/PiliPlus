@@ -1,10 +1,17 @@
-name: Sync upstream and release
+name: Sync upstream
 
+# Merges upstream into main by hand; never tags or releases. To release, push a
+# tag such as 2.2.1F.1 (see docs/releases.md).
 on:
-    schedule:
-        # 23:17 UTC = 09:17 AEST / 10:17 AEDT the next day.
-        - cron: '17 23 * * *'
     workflow_dispatch:
+        inputs:
+            source:
+                description: "release: upstream's latest full release; main: upstream's latest main commit"
+                type: choice
+                options:
+                    - release
+                    - main
+                default: release
 
 permissions:
     contents: write
@@ -17,30 +24,14 @@ jobs:
     sync:
         if: github.repository == 'ahdiua/PiliPlus'
         runs-on: ubuntu-latest
-        outputs:
-            tag: ${{ steps.sync.outputs.tag }}
-            ref: ${{ steps.sync.outputs.ref }}
-            prerelease: ${{ steps.sync.outputs.prerelease }}
         steps:
             - uses: actions/checkout@v7
               with:
                   ref: main
                   fetch-depth: 0
-            - name: Merge upstream and prepare release
-              id: sync
+            - name: Merge upstream into main
               env:
                   GH_TOKEN: ${{ github.token }}
-                  GH_REPO: ${{ github.repository }}
-                  SYNC_EVENT_NAME: ${{ github.event_name }}
+                  SYNC_SOURCE: ${{ inputs.source }}
               shell: bash
               run: bash lib/scripts/sync-upstream.sh
-
-    release:
-        needs: sync
-        if: needs.sync.outputs.tag != ''
-        uses: ./.github/workflows/build.yml
-        with:
-            tag: ${{ needs.sync.outputs.tag }}
-            ref: ${{ needs.sync.outputs.ref }}
-            prerelease: ${{ needs.sync.outputs.prerelease == 'true' }}
-        secrets: inherit

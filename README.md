@@ -228,7 +228,7 @@
 
 可以从 [Releases](https://github.com/bggRGjQaUbCoE/PiliPlus/releases) 下载，或克隆仓库拉取代码后在本地编译。
 
-本 fork 的 App 更新检查只检查[正式 Release](https://github.com/ahdiua/PiliPlus/releases/latest)。每日任务仅在上游出现新的正式 Release tag 时合并到 `main` 并发布正式版，正式版 tag 使用「上游原始 tag + `F`」（例如 `2.1.6.2F`）；手动运行 Actions 中的 **Sync upstream and release** 才同步上游最新开发提交并发布预发布版。普通推送不自动发布，详情见[发布策略](docs/releases.md)。
+本 fork 的 App 更新检查只检查[正式 Release](https://github.com/ahdiua/PiliPlus/releases/latest)。发布由手动推送的 tag 触发，格式为「上游版本 + `F` + 可选的 fork 序号」，例如 `2.2.1F`、`2.2.1F.1`；末尾加 `-pre` 即为预发布版。同步上游需在 Actions 中手动运行 **Sync upstream**，它只合并代码、推送 `main`，不会发布。详情见[发布策略](docs/releases.md)。
 
 <br/>
 
