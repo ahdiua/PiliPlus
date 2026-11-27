@@ -33,14 +33,53 @@ class RipperAutoConcurrency {
   }
 
   double _saturation(int at) {
+    // Upstream's semaphore saturation; for the native proxy, also the time
+    // playback waited on the network (see [networkBound]). Kept apart so
+    // that the two never add up.
+    return max(
+      _busy(_spans, _saturated, _saturatedSince, at),
+      _busy(_boundSpans, _bound, _boundSince, at),
+    );
+  }
+
+  double _busy(
+    List<({int from, int to})> spans,
+    bool open,
+    int openSince,
+    int at,
+  ) {
     final from = at - 5000;
-    _spans.removeWhere((span) => span.to <= from);
-    var busy = _spans.fold(
+    spans.removeWhere((span) => span.to <= from);
+    var busy = spans.fold(
       0,
       (sum, span) => sum + max(0, span.to - max(span.from, from)),
     );
-    if (_saturated) busy += max(0, at - max(_saturatedSince, from));
+    if (open) busy += max(0, at - max(openSince, from));
     return min(1, busy / 5000);
+  }
+
+  // The native proxy's demand signal; see [networkBound].
+  bool _native = false;
+  bool _bound = false;
+  int _boundSince = 0;
+  final _boundSpans = <({int from, int to})>[];
+
+  /// From the native proxy: whether the player is waiting on the network
+  /// right now, rather than on its own full cache. Upstream reads demand off
+  /// its semaphore, but the proxy refills only up to its piece budget, so
+  /// requests rarely queue and that saturation almost never shows: a trial
+  /// that brought nothing was never undone, and with the link itself the
+  /// limit the threads climbed to 64. With this signal, a trial during which
+  /// playback mostly waited on the network is judged by its throughput even
+  /// across a stall (see [delivered]).
+  void networkBound(bool waiting) {
+    _native = true;
+    if (_bound == waiting) return;
+    final at = _now();
+    if (_bound) _boundSpans.add((from: _boundSince, to: at));
+    _bound = waiting;
+    _boundSince = at;
+    _busy(_boundSpans, _bound, _boundSince, at);
   }
 
   void _setLevel(int level, _Trial? trial) {
@@ -55,6 +94,10 @@ class RipperAutoConcurrency {
     final at = _now();
     _rests.removeWhere((_, rest) => rest.until <= at);
     if (at - _changedAt < 2500 || _rests[_level]?.hard == true) return false;
+    // Native, with playback waiting on the network: the trial on its way
+    // decides first. On a short link a stall comes every few seconds, and
+    // stepping at each one replaced every trial before its verdict.
+    if (_native && _trial != null && _saturation(at) >= .6) return false;
     var next = _level + 1;
     while (next < ladder.length && _rests.containsKey(next)) {
       if (_rests[next]!.hard || !strong) return false;
@@ -89,6 +132,18 @@ class RipperAutoConcurrency {
     final trial = _trial;
     if (trial == null || at - trial.at < 10000) return;
     _trial = null;
+    if (_native && trial.baseline > 0 && _saturation(at) >= .6) {
+      // Playback waited on the network through the trial. A stall then
+      // says the link is short, not that the threads were: more of them
+      // that did not raise the throughput by a tenth are undone, and the
+      // rest is hard, as a stall would otherwise step past a soft one and
+      // the threads climb level by level to the top.
+      if (_throughput(at) < trial.baseline * 1.1) {
+        _rests[trial.level] = (until: at + 90000, hard: true);
+        _setLevel(trial.from, null);
+      }
+      return;
+    }
     if (trial.stalled || _saturation(at) < .6 || trial.baseline <= 0) return;
     if (_throughput(at) < trial.baseline) {
       _rests[trial.level] = (until: at + 90000, hard: false);
@@ -161,7 +216,9 @@ class RipperAutoConcurrency {
     _trial = null;
     _buckets.clear();
     _spans.clear();
+    _boundSpans.clear();
     if (_saturated) _saturatedSince = at;
+    if (_bound) _boundSince = at;
     final base = _startup?.base ?? _level;
     final target = _startupLevel(at);
     if (target > _level) _setLevel(target, null);

@@ -874,6 +874,20 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
+  // Tells BTR where playback stands, for its piece deadlines. Called on
+  // every position, buffer, buffering and play/pause change: during a stall
+  // the position stands still, and the buffering change reports it.
+  void _reportPlayback() {
+    final state = _videoPlayerController?.state;
+    if (state == null) return;
+    _networkSession.updatePlayback(
+      aheadSeconds: (state.buffer - state.position).inMilliseconds / 1000,
+      rate: state.rate,
+      playing: state.playing && !_networkRestarting,
+      stalled: state.buffering && !_networkRestarting,
+    );
+  }
+
   /// Reopen at the current position after a network setting changes.
   Future<void> reloadNetworkSettings() async {
     if (_playerCount == 0 || isLive || _videoPlayerController == null) return;
@@ -893,6 +907,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       videoCandidates: source.videoCandidates,
       audioCandidates: source.audioCandidates,
       bandwidth: source.bandwidth,
+      videoBandwidth: source.videoBandwidth,
+      audioBandwidth: source.audioBandwidth,
     );
     try {
       _networkRestarting = true;
@@ -1068,6 +1084,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           audio: audioSource,
           videoCandidates: dataSource.videoCandidates ?? const [],
           audioCandidates: dataSource.audioCandidates ?? const [],
+          videoBitrate: dataSource.videoBandwidth,
+          audioBitrate: dataSource.audioBandwidth,
         ),
         PlaybackNetworkOptions(
           btrEnabled: Pref.threadRipperEnabled,
@@ -1217,6 +1235,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         for (final element in _statusListeners) {
           element(playing ? .playing : .paused);
         }
+        _reportPlayback();
 
         final seconds = videoPlayerController!.state.position.inSeconds;
         if (seconds != 0) {
@@ -1240,11 +1259,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
       /// position
       stream.position.listen((Duration position) {
+        final ahead = (player.state.buffer - position).inMilliseconds / 1000;
+        final playing = player.state.playing && !_networkRestarting;
         _networkSession.autoConcurrency?.buffer(
-          (player.state.buffer - position).inMilliseconds / 1000,
-          player.state.playing && !_networkRestarting,
+          ahead,
+          playing,
           cacheFull: () => player.getProperty('demuxer-cache-idle') == 'yes',
         );
+        _reportPlayback();
         final posInSeconds = position.inSeconds;
 
         if (posInSeconds != this.position.value) {
@@ -1267,6 +1289,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }),
       stream.buffer.listen((Duration buffer) {
         buffered.value = buffer.inSeconds;
+        _reportPlayback();
       }),
       stream.buffering.listen((bool buffering) {
         if (buffering &&
@@ -1277,6 +1300,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           _networkSession.autoConcurrency?.stall();
         }
         if (!buffering) _networkRestarting = false;
+        _reportPlayback();
         isBuffering.value = buffering;
         if (!playerStatus.isCompleted) {
           _stopWakeLockTimer();

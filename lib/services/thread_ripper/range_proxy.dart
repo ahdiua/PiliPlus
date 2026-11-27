@@ -66,26 +66,120 @@ class RipperRangeProxy {
   int get _hedgeMs =>
       _pieceMs == 0 ? 900 : (_pieceMs * 1.5).round().clamp(250, 900);
 
-  // Upstream hedgeDue without a playback deadline. The fixed delay alone
-  // copied nearly every piece once the link itself was the limit, as each took
-  // longer than 900 ms; the copies took a third of the bandwidth and playback
-  // stalled. A copy now starts for a first copy that is stopped, slower than
-  // this route's connections, or slower than the copy's node; a copy beside
-  // one on pace only takes bandwidth from the pieces behind it.
-  bool _hedgeDue(_Receiving first, int delayMs, double copyBps) {
+  // Playback as the player last reported it; see [updatePlayback].
+  final _clock = Stopwatch()..start();
+  double _ahead = 0;
+  double _rate = 1;
+  bool _playing = false;
+  bool _stalled = false;
+  int? _reportedAt;
+
+  /// The player's buffer ahead of the playhead in seconds of media, its
+  /// playback rate, whether it plays, and whether it is [stalled] waiting
+  /// for data. With a recent report, the pieces of a track registered with
+  /// a bitrate get a playback deadline, which decides their copies and their
+  /// place in the queue as upstream's segment deadlines do; without one they
+  /// keep the deadline-free rules.
+  void updatePlayback({
+    required double aheadSeconds,
+    required double rate,
+    required bool playing,
+    bool stalled = false,
+  }) {
+    _ahead = max(0, aheadSeconds);
+    _rate = max(.25, rate.abs());
+    _playing = playing;
+    _stalled = playing && stalled;
+    _reportedAt = _clock.elapsedMilliseconds;
+    for (final track in _tracks.values) {
+      track.reportedWritten = track.written;
+    }
+  }
+
+  /// When playback reaches byte [offset] of [track], in [_clock] ms: the
+  /// buffer reported ahead, then the bytes between what the player had then
+  /// and [offset] at the track's bitrate. Only the pieces in flight, a few
+  /// MiB, are extrapolated, so a variable bitrate errs little. A stall holds
+  /// the playhead, so what it waits for stays due from now on, however long
+  /// it lasts without a report; upstream's deadlines move the same way. Null
+  /// while paused, without a bitrate, or once reports stop for 3 s during
+  /// playback.
+  double? _deadline(_Track track, int offset) {
+    final byteRate = track.byteRate;
+    final reportedAt = _reportedAt;
+    if (byteRate == null || reportedAt == null || !_playing) return null;
+    final now = _clock.elapsedMilliseconds;
+    if (!_stalled && now - reportedAt > 3000) return null;
+    final media = _ahead + max(0, offset - track.reportedWritten) / byteRate;
+    return (_stalled ? now : reportedAt) + media / _rate * 1000;
+  }
+
+  // Upstream hedgeDue. The fixed delay alone copied nearly every piece once
+  // the link itself was the limit, as each took longer than 900 ms; the
+  // copies took a third of the bandwidth and playback stalled. A copy now
+  // starts for a first copy that is stopped, slower than this route's
+  // connections, or slower than the copy's node; a copy beside one on pace
+  // only takes bandwidth from the pieces behind it. With a [deadline], a
+  // first copy on pace to meet it with [_hedgeSlackMs] to spare gets none,
+  // and one that will miss it may spend a copy from [rescue] even so.
+  bool _hedgeDue(
+    _Receiving first,
+    int delayMs,
+    double copyBps, {
+    double? deadline,
+    _Rescue? rescue,
+  }) {
     final ran = first.clock?.elapsedMilliseconds;
     if (ran == null || ran < delayMs) return false;
-    // A node not measured yet is tried, as the chance of a faster one.
-    if (copyBps == 0 || _connectionBps == 0) return true;
-    // No body yet: heads queue behind the other transfers on a busy link.
-    if (first.received == 0) return ran >= _headMs * 1.5;
+    if (deadline == null) {
+      // A node not measured yet is tried, as the chance of a faster one.
+      if (copyBps == 0 || _connectionBps == 0) return true;
+      // No body yet: heads queue behind the other transfers on a busy link.
+      if (first.received == 0) return ran >= _headMs * 1.5;
+      if (ran - first.lastAt >= delayMs) return true;
+      // Judge the pace over a whole delay of transfer, not the wait for it.
+      final moving = ran - first.firstAt;
+      if (moving < delayMs) return false;
+      final rate = first.received * 1000 / moving;
+      return copyBps > rate * 1.5 || rate < _connectionBps * .6;
+    }
+    final now = _clock.elapsedMilliseconds;
+    if (first.received == 0) {
+      // A head waits its usual time, unless that leaves no room before the
+      // deadline.
+      return ran >= _headMs * 1.5 || now + _headMs + _hedgeSlackMs > deadline;
+    }
     if (ran - first.lastAt >= delayMs) return true;
-    // Judge the pace over a whole delay of transfer, not the wait for it.
     final moving = ran - first.firstAt;
     if (moving < delayMs) return false;
     final rate = first.received * 1000 / moving;
-    return copyBps > rate * 1.5 || rate < _connectionBps * .6;
+    final finish = now + first.remaining * 1000 / rate;
+    if (finish <= deadline - _hedgeSlackMs) return false;
+    if (copyBps > rate * 1.5) return true;
+    if (_connectionBps == 0 || rate < _connectionBps * .6) return true;
+    if (copyBps == 0) return true;
+    return finish > deadline && (rescue?.claimStale() ?? false);
   }
+
+  // Upstream's early rescue of a first copy with a deadline, judged on its
+  // progress before the hedge delay: one that will miss the deadline while
+  // running at half the usual connection speed, or that fell 250 ms short of
+  // it at two progress samples in a row, takes a copy from [rescue]'s budget.
+  bool _straggling(_Receiving first, double deadline, _Rescue rescue) {
+    final ran = first.clock?.elapsedMilliseconds;
+    if (ran == null || ran < 250 || first.received == 0) return false;
+    if (first.received == first.sampled) return false;
+    first.sampled = first.received;
+    final bps = first.received * 1000 / ran;
+    final eta = first.remaining * 1000 / bps;
+    final left = deadline - _clock.elapsedMilliseconds;
+    final slower = _connectionBps > 0 && bps < _connectionBps * .5 && eta >= 500;
+    first.deficits = eta - left >= 250 ? first.deficits + 1 : 0;
+    return ((eta >= left && slower) || first.deficits >= 2) &&
+        rescue.claimProgress();
+  }
+
+  static const _hedgeSlackMs = 1500;
 
   void _measure(int bytes, Duration elapsed) {
     if (bytes < 48 * 1024 || elapsed.inMicroseconds <= 0) return;
@@ -120,6 +214,7 @@ class RipperRangeProxy {
             max(1, (concurrency / 8).ceil()).clamp(1, concurrency - 1);
   bool _closed = false;
   HttpServer? _server;
+  Timer? _sampler;
   final String _token = List.generate(
     24,
     (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0'),
@@ -134,12 +229,26 @@ class RipperRangeProxy {
     _server = server;
     autoConcurrency?.newSession();
     autoConcurrency?.onChanged = _drain;
+    // A wait for the network takes from microseconds to seconds and comes
+    // and goes with every chunk; sampling four times a second gives the
+    // share of time without a call per chunk.
+    if (autoConcurrency case final auto?) {
+      _sampler = Timer.periodic(const Duration(milliseconds: 250), (_) {
+        auto.networkBound(_tracks.values.any((track) => track.waiting > 0));
+      });
+    }
     // Transport disconnects can also fail response.close(); each request owns
     // its cleanup in finally, so never leak those errors to the app's zone.
     server.listen((request) => _serve(request).ignore());
   }
 
-  String register(Iterable<String> urls, {bool isAudio = false}) {
+  /// [bitrate], in bits per second, gives the track's pieces playback
+  /// deadlines; see [updatePlayback].
+  String register(
+    Iterable<String> urls, {
+    bool isAudio = false,
+    int? bitrate,
+  }) {
     final originals = urls
         .map(Uri.parse)
         .where(RipperCdnResolver.supports)
@@ -158,6 +267,7 @@ class RipperRangeProxy {
           ? candidates
           : originals,
       isAudio: isAudio,
+      bitrate: bitrate,
     );
   }
 
@@ -166,6 +276,7 @@ class RipperRangeProxy {
     List<Uri> urls, {
     List<Uri>? originals,
     bool isAudio = false,
+    int? bitrate,
   }) {
     if (_closed || _server == null || urls.isEmpty) {
       throw StateError('No download session or media candidates');
@@ -183,6 +294,7 @@ class RipperRangeProxy {
         originals: originals,
       ),
       isAudio,
+      bitrate != null && bitrate > 0 ? bitrate / 8 : null,
     );
     return 'http://127.0.0.1:${_server!.port}$id';
   }
@@ -190,8 +302,10 @@ class RipperRangeProxy {
   void close() {
     if (_closed) return;
     _closed = true;
+    _sampler?.cancel();
     autoConcurrency?.onChanged = null;
     autoConcurrency?.demand(0, concurrency, 0);
+    autoConcurrency?.networkBound(false);
     for (final job in _jobs.toList()) {
       job.cancel();
     }
@@ -210,10 +324,19 @@ class RipperRangeProxy {
     _Job job, {
     required bool rescue,
     required int priority,
+    _Queue queue = _Queue.critical,
+    double? Function()? deadline,
   }) async {
     job.check();
     if (_closed) throw const HttpException('Download session closed');
-    final waiter = _Waiter(rescue, priority, _sequence++);
+    final waiter = _Waiter(
+      rescue,
+      priority,
+      _sequence++,
+      queue,
+      deadline,
+      _clock.elapsedMilliseconds,
+    );
     void cancel() {
       if (_waiters.remove(waiter)) {
         waiter.ready.completeError(const HttpException('Download cancelled'));
@@ -230,12 +353,50 @@ class RipperRangeProxy {
     }
   }
 
+  /// Upstream's rank within a queue class (classes are served in order
+  /// first): the priority, plus a bounded boost for a [deadline] close or
+  /// past, plus, for a request with a deadline, 20 for every 0.9 s it has
+  /// waited since [queuedAt], so that a piece queued long ago is not passed
+  /// over again and again by newer ones of a slightly higher priority.
+  /// Without a deadline the rank is the priority alone. Times in ms.
+  static double queueRank(
+    int priority, {
+    double? deadline,
+    required int now,
+    required int queuedAt,
+  }) {
+    if (deadline == null) return priority.toDouble();
+    final left = deadline - now;
+    final urgency = left <= 0
+        ? 12
+        : left <= 750
+        ? 9
+        : left <= 2000
+        ? 6
+        : 0;
+    return priority + urgency + (now - queuedAt) * 20 / 900;
+  }
+
   void _drain() {
     if (_closed) return;
-    _waiters.sort((a, b) {
-      final priority = b.priority.compareTo(a.priority);
-      return priority != 0 ? priority : a.sequence.compareTo(b.sequence);
-    });
+    if (_waiters.length > 1) {
+      final now = _clock.elapsedMilliseconds;
+      final ranks = {
+        for (final w in _waiters)
+          w: queueRank(
+            w.priority,
+            deadline: w.deadline?.call(),
+            now: now,
+            queuedAt: w.queuedAt,
+          ),
+      };
+      _waiters.sort((a, b) {
+        final queue = a.queue.index.compareTo(b.queue.index);
+        if (queue != 0) return queue;
+        final rank = ranks[b]!.compareTo(ranks[a]!);
+        return rank != 0 ? rank : a.sequence.compareTo(b.sequence);
+      });
+    }
     while (_active < concurrency) {
       final index = _waiters.indexWhere(
         (w) => w.rescue || _normalActive < _normalLimit,
@@ -269,12 +430,20 @@ class RipperRangeProxy {
     _Resume? resume,
     _Receiving? receiving,
     _Receiving? primary,
+    _Queue queue = _Queue.critical,
+    double? Function()? deadline,
   }) async {
-    await _slot(job, rescue: rescue, priority: priority);
+    await _slot(
+      job,
+      rescue: rescue,
+      priority: priority,
+      queue: queue,
+      deadline: deadline,
+    );
     HttpClientRequest? request;
     final clock = Stopwatch()..start();
     receiving?.clock = clock;
-    Timer? deadline;
+    Timer? attemptTimer;
     int status = 0;
     int received = 0;
     bool completed = false;
@@ -292,13 +461,14 @@ class RipperRangeProxy {
           start += prefix.length;
         }
       }
+      receiving?.wanted = end - start + 1;
       // Like upstream, one first-byte timeout covers connecting and the
       // response head together.
       const firstByte = Duration(milliseconds: 5500);
       request = await _client.getUrl(url).timeout(firstByte);
       job.check();
       job.requests.add(request);
-      deadline = Timer(const Duration(seconds: 15), () {
+      attemptTimer = Timer(const Duration(seconds: 15), () {
         request?.abort(const HttpException('Range attempt timed out'));
       });
       request.headers
@@ -372,7 +542,7 @@ class RipperRangeProxy {
       }
       rethrow;
     } finally {
-      deadline?.cancel();
+      attemptTimer?.cancel();
       if (!completed) request?.abort();
       job.requests.remove(request);
       _release(rescue: rescue);
@@ -393,6 +563,9 @@ class RipperRangeProxy {
     bool hurry = false,
     _Resume? resume,
     _Feed? feed,
+    _Queue queue = _Queue.critical,
+    double? Function()? deadline,
+    _Rescue? rescue,
   }) async {
     final result = Completer<_Piece>();
     final jobs = <_Job>[];
@@ -420,6 +593,8 @@ class RipperRangeProxy {
         resume: resume,
         receiving: metadata ? null : receiving[index],
         primary: index > 0 ? receiving.first : null,
+        queue: queue,
+        deadline: deadline,
       ).then(
         (piece) {
           if (!result.isCompleted) result.complete(piece);
@@ -448,21 +623,32 @@ class RipperRangeProxy {
       } else if (metadata) {
         timers.add(Timer(Duration(milliseconds: delay), () => launch(i)));
       } else {
-        // Checked every 50 ms like upstream, from the first check due.
+        // Checked every 50 ms like upstream: from the first check due, or,
+        // for a piece with a deadline, from the start, so that a straggler
+        // can be rescued before the delay.
         void check() {
           if (result.isCompleted || parent.cancelled) return;
+          final first = receiving.first;
+          final due = deadline?.call();
           if (_hedgeDue(
-            receiving.first,
-            delay,
-            track.resolver.speed(urls[i]),
-          )) {
+                first,
+                delay,
+                track.resolver.speed(urls[i]),
+                deadline: due,
+                rescue: rescue,
+              ) ||
+              (due != null &&
+                  rescue != null &&
+                  _straggling(first, due, rescue))) {
             launch(i);
           } else {
             timers.add(Timer(const Duration(milliseconds: 50), check));
           }
         }
 
-        timers.add(Timer(Duration(milliseconds: delay), check));
+        timers.add(
+          Timer(Duration(milliseconds: deadline == null ? delay : 50), check),
+        );
       }
     }
     try {
@@ -490,6 +676,9 @@ class RipperRangeProxy {
     bool startup = false,
     bool hurry = false,
     _Feed? feed,
+    _Queue queue = _Queue.critical,
+    double? Function()? deadline,
+    _Rescue? rescue,
   }) async {
     final clock = Stopwatch()..start();
     final resume = _Resume(end - start + 1);
@@ -553,6 +742,9 @@ class RipperRangeProxy {
             hurry: hurry,
             resume: resume,
             feed: feed,
+            queue: queue,
+            deadline: deadline,
+            rescue: rescue,
           );
           job.check();
           autoConcurrency?.delivered(piece.bytes.length);
@@ -598,7 +790,12 @@ class RipperRangeProxy {
       track.request = job;
       // mpv only asks again for bytes its cache lacks, i.e. upstream's seek
       // outside the buffer.
-      if (track.opened) autoConcurrency?.newSession();
+      if (track.opened) {
+        autoConcurrency?.newSession();
+        // The buffer last reported was the one before the seek; deadlines
+        // wait for the player's next report.
+        _reportedAt = null;
+      }
       track.opened = true;
     }
     socket.listen(
@@ -693,10 +890,24 @@ class RipperRangeProxy {
         var batchIndex = 0;
         var size = 64 * 1024;
         var written = headEnd + 1;
+        // What the player holds decides the deadlines of the track's pieces;
+        // a request replaced by a newer one no longer speaks for the track.
+        void advance(int to) {
+          written = to;
+          if (identical(track.request, job)) track.written = to;
+        }
+
+        advance(written);
+        // Upstream gives each range its rescue budget; the native window of
+        // about 2 MiB stands in for the range.
+        var rescue = _Rescue(0);
         final pieces = <(_Feed, Future<(_Piece?, Object?, StackTrace?)>)>[];
         void enqueue() {
           if (cursor > end) return;
           if (batchIndex >= primaries.length) {
+            rescue = _Rescue(
+              concurrency >= 8 ? min(8, (concurrency / 8).ceil()) : 0,
+            );
             final startupBatch = index <= budget;
             preferred = track.resolver.rangeCandidates();
             final proven = startupBatch
@@ -730,9 +941,11 @@ class RipperRangeProxy {
           // Native mpv requests are open-ended rather than SIDX segments.
           // Partition a bounded 2 MiB video window over the same piece budget
           // instead of turning the upstream 64 KiB minimum into a fixed size.
+          final first = cursor;
           final last = min(end, cursor + size - 1);
           final primary = primaries[batchIndex++];
           final feed = _Feed(cursor);
+          final startup = index <= budget;
           final result =
               _download(
                 track,
@@ -744,11 +957,16 @@ class RipperRangeProxy {
                   ...preferred.where((url) => url != primary),
                 ],
                 pieceIndex: index,
-                hurry: index <= budget,
-                priority: index <= budget
+                hurry: startup,
+                priority: startup
                     ? 120 - min(30, index++)
                     : 55 - min(20, index++ % budget),
                 feed: feed,
+                queue: startup ? _Queue.startup : _Queue.ordinary,
+                deadline: track.byteRate == null
+                    ? null
+                    : () => _deadline(track, first),
+                rescue: rescue,
               ).then<(_Piece?, Object?, StackTrace?)>(
                 (piece) => (piece, null, null),
                 onError: (Object error, StackTrace stack) =>
@@ -769,10 +987,15 @@ class RipperRangeProxy {
           while (!feed.done) {
             if (feed.from(written) case final bytes?) {
               socket.add(bytes);
-              written += bytes.length;
+              advance(written + bytes.length);
               await job.race(socket.flush());
             } else {
-              await job.race(feed.changed);
+              track.waiting++;
+              try {
+                await job.race(feed.changed);
+              } finally {
+                track.waiting--;
+              }
             }
             job.check();
           }
@@ -787,7 +1010,7 @@ class RipperRangeProxy {
             socket.add(
               Uint8List.sublistView(piece.bytes, written - feed.start),
             );
-            written = feed.start + piece.bytes.length;
+            advance(feed.start + piece.bytes.length);
           }
           await job.race(socket.flush());
           job.check();
@@ -857,14 +1080,35 @@ class RipperRangeProxy {
 }
 
 class _Track {
-  _Track(this.resolver, this.isAudio);
+  _Track(this.resolver, this.isAudio, this.byteRate);
   final bool isAudio;
   final RipperCdnResolver resolver;
+  // Bytes per second of media; null when the bitrate is unknown.
+  final double? byteRate;
   int? total;
   _Job? request;
   bool opened = false;
   // Nodes that refused the track since its last complete piece.
   final refusedBy = <String>{};
+  // File offset up to which the current request has handed bytes to the
+  // player, and what it was at the last playback report.
+  int written = 0;
+  int reportedWritten = 0;
+  // Requests of the track waiting for the next bytes of the piece the
+  // player reads, as opposed to waiting for the player to take more.
+  int waiting = 0;
+}
+
+/// A range's budget of copies started before their hedge delay, or for a
+/// piece that will miss its deadline beside a node not known to be faster;
+/// upstream's createEarlyHedge.
+class _Rescue {
+  _Rescue(int limit) : _progress = max(0, limit), _stale = max(1, limit);
+  int _progress;
+  int _stale;
+
+  bool claimProgress() => _progress > 0 && _progress-- > 0;
+  bool claimStale() => _stale > 0 && _stale-- > 0;
 }
 
 class _Piece {
@@ -898,6 +1142,13 @@ class _Receiving {
   int firstAt = 0;
   int lastAt = 0;
   int received = 0;
+  // Bytes this copy asked for, after any resumed prefix.
+  int wanted = 0;
+  int get remaining => max(0, wanted - received);
+  // For [RipperRangeProxy._straggling]: bytes at its last sample, and how
+  // many samples in a row fell short of the deadline.
+  int sampled = 0;
+  int deficits = 0;
 
   void add(List<int> chunk, int at) {
     if (received == 0) firstAt = at;
@@ -1025,10 +1276,27 @@ class _Job {
   }
 }
 
+/// Upstream's queue classes, served in this order: metadata and the startup
+/// heads, then startup pieces, then everything else. Boosts never carry a
+/// request past a class.
+enum _Queue { critical, startup, ordinary }
+
 class _Waiter {
-  _Waiter(this.rescue, this.priority, this.sequence);
+  _Waiter(
+    this.rescue,
+    this.priority,
+    this.sequence,
+    this.queue,
+    this.deadline,
+    this.queuedAt,
+  );
   final bool rescue;
   final int priority;
   final int sequence;
+  final _Queue queue;
+  // When playback needs the request, read again at every drain: the
+  // playhead and the rate move it while the request waits.
+  final double? Function()? deadline;
+  final int queuedAt;
   final ready = Completer<void>();
 }

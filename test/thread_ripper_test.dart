@@ -293,6 +293,7 @@ void main() {
   late int active;
   late int peak;
   late List<Timer> timers;
+  late _Link link;
 
   setUp(() async {
     source = Uint8List.fromList(List.generate(1100000, (i) => (i * 37) % 251));
@@ -301,6 +302,9 @@ void main() {
     interruptedEnds = {};
     timers = [];
     active = peak = 0;
+    // 10 Mbit/s with a 40 ms round trip, like the capped route of fork
+    // issue #5.
+    link = _Link(1250000);
     cdn = await HttpServer.bind(InternetAddress.loopbackIPv4, 0)
       ..listen((request) async {
         paths.add(request.uri.path);
@@ -345,6 +349,10 @@ void main() {
             'bytes $reportedStart-$end/$reportedTotal',
           );
           var body = source.sublist(start, end + 1);
+          if (request.uri.path.startsWith('/link')) {
+            link.send(response, body, timers);
+            return;
+          }
           if (request.uri.path == '/resume-primary' &&
               start >= 65536 &&
               body.length > 65536) {
@@ -470,6 +478,66 @@ void main() {
     final res = await req.close();
     final bytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
     return (res, bytes);
+  }
+
+  // Reads [url] the way mpv plays it at [byteRate] bytes per second: playback
+  // starts, and resumes after running dry, with [startSeconds] buffered;
+  // reading pauses above [maxSeconds], mpv's cache limit, so the proxy sees
+  // backpressure. [onTick] sees the state every 50 ms.
+  Future<_Playback> playback(
+    String url,
+    double byteRate, {
+    Duration limit = const Duration(seconds: 20),
+    double startSeconds = 1,
+    double maxSeconds = 8,
+    void Function(_Playback)? onTick,
+  }) async {
+    final state = _Playback(byteRate);
+    final watch = Stopwatch()..start();
+    final response = await (await client.getUrl(Uri.parse(url))).close();
+    final finished = Completer<void>();
+    final subscription = response.listen(
+      (chunk) {
+        state.bytes.add(chunk);
+        state.received += chunk.length;
+      },
+      onDone: () => state.ended = true,
+      onError: (Object _) => state.ended = true,
+      cancelOnError: true,
+    );
+    var last = watch.elapsed;
+    Timer.periodic(const Duration(milliseconds: 50), (ticker) {
+      final now = watch.elapsed;
+      final seconds = (now - last).inMicroseconds / 1000000;
+      last = now;
+      if (state.playing) {
+        state.played = min(
+          state.received.toDouble(),
+          state.played + byteRate * seconds,
+        );
+        if (state.played >= state.received && !state.ended) {
+          state.playing = false;
+          state.underruns++;
+        }
+      } else if (state.aheadSeconds >= startSeconds ||
+          (state.ended && state.received > state.played)) {
+        state.playing = true;
+        state.startedAt ??= now;
+      }
+      if (state.aheadSeconds > maxSeconds) {
+        if (!subscription.isPaused) subscription.pause();
+      } else if (subscription.isPaused) {
+        subscription.resume();
+      }
+      onTick?.call(state);
+      if ((state.ended && state.played >= state.received) || now >= limit) {
+        ticker.cancel();
+        unawaited(subscription.cancel());
+        finished.complete();
+      }
+    });
+    await finished.future;
+    return state;
   }
 
   test(
@@ -733,6 +801,109 @@ void main() {
     expect(ends.length - ends.toSet().length, lessThanOrEqualTo(3));
   });
 
+  group('playback deadlines', () {
+    // A player reporting the same buffer every 100 ms, as the position
+    // listener does.
+    Timer report(double ahead) =>
+        Timer.periodic(const Duration(milliseconds: 100), (_) {
+          proxy.updatePlayback(aheadSeconds: ahead, rate: 1, playing: true);
+        });
+    int copies() {
+      final ends = requests.where((r) => r.$2 >= 65536).map((r) => r.$3);
+      return ends.length - ends.toSet().length;
+    }
+
+    setUp(() async {
+      source = Uint8List.fromList(List.generate(3 << 20, (i) => i % 251));
+      proxy.close();
+      proxy = RipperRangeProxy(concurrency: 8, userAgent: 'test');
+      await proxy.start();
+    });
+
+    test('pieces on pace for a distant deadline get no copy', () async {
+      final url = proxy.registerCandidates(
+        [endpoint('/pace'), endpoint('/pace-b')],
+        bitrate: 800000,
+      );
+      final timer = report(30);
+      try {
+        expect((await fetch(url)).$2, source);
+      } finally {
+        timer.cancel();
+      }
+      expect(copies(), 0);
+    });
+
+    test('pieces that will miss their deadline get bounded copies', () async {
+      // Stalled: every piece is due now, and both nodes run at the usual
+      // speed, so only the rescue budget can buy a copy.
+      final url = proxy.registerCandidates(
+        [endpoint('/pace'), endpoint('/pace-b')],
+        bitrate: 8000000,
+      );
+      final timer = report(0);
+      try {
+        expect((await fetch(url)).$2, source);
+      } finally {
+        timer.cancel();
+      }
+      // Two windows of about 2 MiB, each with one early and one late copy
+      // at eight threads.
+      expect(copies(), inInclusiveRange(1, 4));
+    });
+
+    test('a track without a bitrate keeps the deadline-free rules', () async {
+      final timer = report(0);
+      try {
+        expect((await fetch(register(['/pace', '/pace-b']))).$2, source);
+      } finally {
+        timer.cancel();
+      }
+      expect(copies(), lessThanOrEqualTo(3));
+    });
+  });
+
+  test('a stall keeps pieces due without further reports', () async {
+    source = Uint8List.fromList(List.generate(3 << 20, (i) => i % 251));
+    proxy.close();
+    proxy = RipperRangeProxy(concurrency: 8, userAgent: 'test');
+    await proxy.start();
+    final url = proxy.registerCandidates(
+      [endpoint('/pace'), endpoint('/pace-b')],
+      bitrate: 8000000,
+    );
+    // The position stands still during a stall, so the player reports it
+    // once; the pieces stay due without further reports.
+    proxy.updatePlayback(
+      aheadSeconds: 0,
+      rate: 1,
+      playing: true,
+      stalled: true,
+    );
+    expect((await fetch(url)).$2, source);
+    final ends = requests.where((r) => r.$2 >= 65536).map((r) => r.$3);
+    expect(ends.length - ends.toSet().length, inInclusiveRange(1, 4));
+  });
+
+  test('queue rank: deadline boosts and aging, none without a deadline', () {
+    double rank(int priority, {double? deadline, int waited = 0}) =>
+        RipperRangeProxy.queueRank(
+          priority,
+          deadline: deadline,
+          now: 10000,
+          queuedAt: 10000 - waited,
+        );
+    expect(rank(55), 55);
+    expect(rank(55, waited: 9000), 55);
+    expect(rank(55, deadline: 20000), 55);
+    expect(rank(55, deadline: 11500), 61);
+    expect(rank(55, deadline: 10500), 64);
+    expect(rank(55, deadline: 9000), 67);
+    // 20 for every 0.9 s: a piece queued 0.9 s ago catches up with a newer
+    // one 20 above it.
+    expect(rank(35, deadline: 20000, waited: 900), rank(55, deadline: 20000));
+  });
+
   test(
     'interrupted verified pieces resume without dropping or repeating bytes',
     () async {
@@ -799,6 +970,36 @@ void main() {
     });
   });
 
+  group('a shared, capped link', () {
+    setUp(() async {
+      source = Uint8List.fromList(
+        List.generate(3 << 20, (i) => (i * 31) % 251),
+      );
+      proxy.close();
+      proxy = RipperRangeProxy(concurrency: 8, userAgent: 'test');
+      await proxy.start();
+    });
+
+    test('caps every connection together', () async {
+      final watch = Stopwatch()..start();
+      final result = await fetch(register(['/link-a', '/link-b']));
+      expect(result.$2, source);
+      // 3 MiB at 1.25 MB/s takes 2.5 s however many connections share it.
+      expect(watch.elapsed, greaterThan(const Duration(milliseconds: 2400)));
+      expect(peak, greaterThan(1));
+    });
+
+    test('plays a bitrate well below the link through', () async {
+      // 4.8 Mbit/s on a 10 Mbit/s link.
+      final played = await playback(
+        register(['/link-a', '/link-b']),
+        600000,
+      );
+      expect(played.bytes.takeBytes(), source);
+      expect(played.underruns, 0);
+    });
+  });
+
   test('hedge resumes the live primary prefix on a different node', () async {
     final watch = Stopwatch()..start();
     final result = await fetch(register(['/resume-primary', '/resume-backup']));
@@ -827,4 +1028,64 @@ class _CountingAuto extends RipperAutoConcurrency {
     sessions++;
     super.newSession();
   }
+}
+
+/// One downlink that every `/link` response shares: [bytesPerSecond] in
+/// total, handed out in 32 KiB slices in turn, after a 40 ms round trip per
+/// response. The link itself is the limit, as on a capped mobile or overseas
+/// route, so every piece in flight takes bandwidth from the others.
+class _Link {
+  _Link(this.bytesPerSecond);
+  final int bytesPerSecond;
+  static const latency = Duration(milliseconds: 40);
+  final _clock = Stopwatch()..start();
+  int _freeAt = 0;
+
+  void send(HttpResponse response, List<int> body, List<Timer> timers) {
+    var gone = false;
+    unawaited(
+      response.done.then((_) => gone = true, onError: (Object _) => gone = true),
+    );
+    var at = 0;
+    void next() {
+      if (gone) return;
+      if (at >= body.length) {
+        unawaited(response.close().catchError((Object _) {}));
+        return;
+      }
+      final slice = body.sublist(at, min(at + 32768, body.length));
+      at += slice.length;
+      final now = _clock.elapsedMicroseconds;
+      _freeAt = max(now, _freeAt) + slice.length * 1000000 ~/ bytesPerSecond;
+      timers.add(
+        Timer(Duration(microseconds: _freeAt - now), () {
+          if (gone) return;
+          try {
+            response.add(slice);
+          } catch (_) {
+            gone = true;
+            return;
+          }
+          next();
+        }),
+      );
+    }
+
+    timers.add(Timer(latency, next));
+  }
+}
+
+/// What a player reading a track at a steady bitrate saw.
+class _Playback {
+  _Playback(this.byteRate);
+  final double byteRate;
+  final bytes = BytesBuilder(copy: false);
+  int received = 0;
+  double played = 0;
+  bool playing = false;
+  bool ended = false;
+  int underruns = 0;
+  Duration? startedAt;
+
+  double get aheadSeconds => (received - played) / byteRate;
 }

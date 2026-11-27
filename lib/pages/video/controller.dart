@@ -770,6 +770,8 @@ class VideoDetailController extends GetxController
               bandwidth: dash == null
                   ? null
                   : (firstVideo.bandWidth ?? 0) + (audioItem?.bandWidth ?? 0),
+              videoBandwidth: dash == null ? null : firstVideo.bandWidth,
+              audioBandwidth: audioItem?.bandWidth,
             ),
       seekTo: seek,
       duration: data.timeLength == null

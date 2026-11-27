@@ -14,12 +14,18 @@ sealed class DataSource {
 class NetworkSource extends DataSource {
   final List<String>? videoCandidates;
   final List<String>? audioCandidates;
+  // Video and audio together, in bits per second; sizes the buffer.
   final int? bandwidth;
+  // Each track's own bitrate, for BTR's playback deadlines.
+  final int? videoBandwidth;
+  final int? audioBandwidth;
 
   NetworkSource({
     this.videoCandidates,
     this.audioCandidates,
     this.bandwidth,
+    this.videoBandwidth,
+    this.audioBandwidth,
     required super.videoSource,
     required super.audioSource,
   });

@@ -13,8 +13,16 @@ class _FixtureProxy extends RipperRangeProxy {
   _FixtureProxy() : super(concurrency: 4, userAgent: 'test');
 
   @override
-  String register(Iterable<String> urls, {bool isAudio = false}) {
-    return registerCandidates(urls.map(Uri.parse).toList(), isAudio: isAudio);
+  String register(
+    Iterable<String> urls, {
+    bool isAudio = false,
+    int? bitrate,
+  }) {
+    return registerCandidates(
+      urls.map(Uri.parse).toList(),
+      isAudio: isAudio,
+      bitrate: bitrate,
+    );
   }
 }
 

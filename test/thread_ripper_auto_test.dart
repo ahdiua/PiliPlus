@@ -62,4 +62,57 @@ void main() {
     auto.buffer(4, true, cacheFull: full);
     expect((auto.threads, asked), (8, 2));
   });
+
+  group('native network-bound signal', () {
+    late int now;
+    late RipperAutoConcurrency auto;
+    // [ms] of playback waiting on the network while [bytesPerSecond]
+    // arrive, as the proxy samples and delivers them.
+    void run(int ms, int bytesPerSecond, {bool bound = true}) {
+      for (var t = 0; t < ms; t += 250) {
+        now += 250;
+        auto.networkBound(bound);
+        auto.delivered(bytesPerSecond ~/ 4);
+      }
+    }
+
+    setUp(() {
+      now = 10000;
+      auto = RipperAutoConcurrency(now: () => now);
+    });
+
+    test('stalls on a link that is the limit do not climb the ladder', () {
+      run(5000, 1250000);
+      expect(auto.stall(), isTrue);
+      expect(auto.threads, 12);
+      // A stall every 3 s for 30 s, the link unchanged: the trial is not
+      // replaced before its verdict, which undoes it and bars 12 threads.
+      for (var i = 0; i < 10; i++) {
+        run(3000, 1250000);
+        auto.stall();
+      }
+      expect(auto.threads, 8);
+    });
+
+    test('more threads that raise the throughput stay', () {
+      run(5000, 500000);
+      expect(auto.stall(), isTrue);
+      run(11000, 800000);
+      expect(auto.threads, 12);
+      run(3000, 800000);
+      auto.stall();
+      expect(auto.threads, 16);
+    });
+
+    test('without the signal the upstream rules are unchanged', () {
+      for (var t = 0; t < 5000; t += 250) {
+        now += 250;
+        auto.delivered(1250000 ~/ 4);
+      }
+      expect(auto.stall(), isTrue);
+      now += 3000;
+      expect(auto.stall(), isTrue);
+      expect(auto.threads, 16);
+    });
+  });
 }

@@ -27,6 +27,8 @@ class PlaybackNetworkSources {
     this.audio,
     this.videoCandidates = const [],
     this.audioCandidates = const [],
+    this.videoBitrate,
+    this.audioBitrate,
   });
 
   // These remain the user's manual single-CDN URLs throughout BTR sessions.
@@ -34,6 +36,9 @@ class PlaybackNetworkSources {
   final String? audio;
   final List<String> videoCandidates;
   final List<String> audioCandidates;
+  // Bits per second, for BTR's playback deadlines; null when unknown.
+  final int? videoBitrate;
+  final int? audioBitrate;
 }
 
 /// Owns download sessions, without writing the user's CDN preference.
@@ -63,6 +68,19 @@ class PlaybackNetworkSession {
 
   RipperAutoConcurrency? get autoConcurrency => _proxy?.autoConcurrency;
   bool get usingBtr => _proxy != null;
+
+  /// See [RipperRangeProxy.updatePlayback]; does nothing without BTR.
+  void updatePlayback({
+    required double aheadSeconds,
+    required double rate,
+    required bool playing,
+    bool stalled = false,
+  }) => _proxy?.updatePlayback(
+    aheadSeconds: aheadSeconds,
+    rate: rate,
+    playing: playing,
+    stalled: stalled,
+  );
 
   void cancel() {
     _generation++;
@@ -99,9 +117,16 @@ class PlaybackNetworkSession {
       try {
         await proxy.start();
         if (generation != _generation) return null;
-        final video = proxy.register(source.videoCandidates);
+        final video = proxy.register(
+          source.videoCandidates,
+          bitrate: source.videoBitrate,
+        );
         final audio = source.audio != null && source.audioCandidates.isNotEmpty
-            ? proxy.register(source.audioCandidates, isAudio: true)
+            ? proxy.register(
+                source.audioCandidates,
+                isAudio: true,
+                bitrate: source.audioBitrate,
+              )
             : source.audio;
         return PlaybackNetworkSources(video: video, audio: audio);
       } catch (_) {
