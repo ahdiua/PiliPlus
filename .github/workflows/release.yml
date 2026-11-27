@@ -3,7 +3,7 @@ name: Release
 # Pushing a tag releases the commit it points to: <upstream version>F, then an
 # optional fork release number, and -pre for a prerelease, for example 2.2.1F,
 # 2.2.1F.1 or 2.2.1F.2-pre. These filters only select candidates;
-# lib/scripts/release-tag.sh checks the exact form, that the version matches
+# lib/scripts/release-tag.ps1 checks the exact form, that the version matches
 # pubspec.yaml, and that the commit is on main. See docs/releases.md.
 on:
     push:
@@ -32,8 +32,8 @@ jobs:
               id: tag
               env:
                   RELEASE_TAG: ${{ github.ref_name }}
-              shell: bash
-              run: bash lib/scripts/release-tag.sh
+              shell: pwsh
+              run: lib/scripts/release-tag.ps1
 
     release:
         needs: tag

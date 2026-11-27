@@ -33,5 +33,5 @@ jobs:
               env:
                   GH_TOKEN: ${{ github.token }}
                   SYNC_SOURCE: ${{ inputs.source }}
-              shell: bash
-              run: bash lib/scripts/sync-upstream.sh
+              shell: pwsh
+              run: lib/scripts/sync-upstream.ps1

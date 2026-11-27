@@ -22,7 +22,7 @@ tag 格式为「上游版本 + `F` + 可选的 fork 序号 + 可选的 `-pre`」
 
 - 上游自己也会发四段版本（2.2.0.1、2.2.0.2），所以 fork 小版本不用 `2.2.1.1` 这种写法，以免撞名。
 - 允许上游式的 `v` 前缀（`v2.2.1F.1`）。序号从 1 开始，不能有前导零。
-- 构建前会依次检查（`lib/scripts/release-tag.sh`），任何一项不满足就不构建：
+- 构建前会依次检查（`lib/scripts/release-tag.ps1`），任何一项不满足就不构建：
   - tag 格式正确；
   - tag 中的前三段版本与该提交 `pubspec.yaml` 的版本一致。上游的第四段不在 pubspec 里，
     例如 `2.2.0.1F` 对应的 pubspec 是 `2.2.0`；
@@ -64,8 +64,9 @@ tag 格式为「上游版本 + `F` + 可选的 fork 序号 + 可选的 `-pre`」
 `2.2.1F`、`2.1.6.2F` 以及 `2.1.6F.<UTC 时间戳>` 这些 tag 和已发布的 Release 保持不变。
 旧格式本身也符合新规则（时间戳就是一个很大的序号），但只有新推送的 tag 才会触发构建。
 
-发布策略的本地回归测试（Python 3 + Git Bash，不会发布真实 Release）：
+发布相关脚本都在 `lib/scripts`，和上游的构建脚本一样使用 PowerShell 7.4+，
+工作流里以 `shell: pwsh` 运行。本地回归测试只需要 pwsh 和 Git，不会发布真实 Release：
 
 ```text
-python tool/check_release_policy.py
+./tool/check_release_policy.ps1
 ```
