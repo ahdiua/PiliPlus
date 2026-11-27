@@ -41,6 +41,68 @@ void main() {
     },
   );
 
+  test('relay addresses are never moved to ordinary nodes (upstream #47)', () {
+    const mcdn =
+        'https://xy1x2x3x4xy.mcdn.bilivideo.cn:4483/upgcxcode/v.m4s?sign=relay';
+    const coso1Relay =
+        'https://upos-sz-mirrorcoso1.bilivideo.com/upgcxcode/v.m4s?os=mcdn&sign=relay2';
+    const resource =
+        'https://cache.mountaintoys.cn/v1/resource/v.m4s?sign=relay';
+    const good = '/upgcxcode/v.m4s?sign=good';
+    List<String> nodes(List<String> hosts) => [
+      for (final host in hosts) 'https://$host$good',
+    ];
+    // Expected lists come from upstream 2026.11.15.1 representationUrls().
+    final cases = <(List<String>, bool, List<String>)>[
+      (
+        [mcdn, 'https://upos-sz-mirrorali.bilivideo.com$good'],
+        true,
+        [mcdn, ...nodes(RipperCdnResolver.overseasHosts)],
+      ),
+      (
+        [mcdn, 'https://upos-sz-mirrorali.bilivideo.com$good'],
+        false,
+        nodes(RipperCdnResolver.mainlandHosts),
+      ),
+      ([mcdn, coso1Relay], true, [mcdn, coso1Relay]),
+      ([mcdn, coso1Relay], false, [coso1Relay, mcdn]),
+      (
+        [resource, 'https://video.akamaized.net$good'],
+        true,
+        [
+          resource,
+          'https://video.akamaized.net$good',
+          ...nodes(RipperCdnResolver.overseasHosts),
+        ],
+      ),
+      (
+        [resource, 'https://video.akamaized.net$good'],
+        false,
+        nodes(RipperCdnResolver.mainlandHosts),
+      ),
+    ];
+    for (final (input, overseas, expected) in cases) {
+      expect(
+        RipperCdnResolver.candidates(
+          input,
+          overseas: overseas,
+        ).map((u) => u.toString()).toList(),
+        expected,
+        reason: '$input overseas=$overseas',
+      );
+    }
+    expect(
+      RipperCdnResolver.isRelay(
+        Uri.parse('https://upos-sz-mirrorali.bilivideo.com$good'),
+      ),
+      isFalse,
+    );
+    expect(
+      RipperCdnResolver.mainlandHosts.last,
+      'upos-sz-mirrorcoso1.bilivideo.com',
+    );
+  });
+
   test('open, bounded, suffix and invalid downstream ranges', () {
     expect(RipperRangeProxy.parseRange(null, 100), (0, 99));
     expect(RipperRangeProxy.parseRange('bytes=20-', 100), (20, 99));
@@ -255,8 +317,14 @@ void main() {
           );
           final (start, end) = range;
           requests.add((request.uri.path, start, end));
-          if (request.uri.path == '/forbidden') {
+          if (request.uri.path == '/forbidden' ||
+              (request.uri.path == '/expiring' && start >= 400000)) {
             response.statusCode = 403;
+            await response.close();
+            return;
+          }
+          if (request.uri.path == '/gone') {
+            response.statusCode = 410;
             await response.close();
             return;
           }
@@ -286,6 +354,41 @@ void main() {
               Timer(const Duration(seconds: 3), () {
                 try {
                   response.add(body.sublist(65536));
+                  unawaited(response.close().catchError((Object _) {}));
+                } catch (_) {}
+              }),
+            );
+            return;
+          }
+          if (request.uri.path.startsWith('/pace')) {
+            // The link is the limit: every connection receives at the same
+            // steady 160 KiB/s, so pieces take longer than the hedge delay.
+            var at = 0;
+            void next() {
+              try {
+                if (at >= body.length) {
+                  unawaited(response.close().catchError((Object _) {}));
+                  return;
+                }
+                response.add(body.sublist(at, min(at + 16384, body.length)));
+                at += 16384;
+                timers.add(Timer(const Duration(milliseconds: 100), next));
+              } catch (_) {}
+            }
+
+            next();
+            return;
+          }
+          if (request.uri.path == '/trickle' && start >= 65536) {
+            // Half of every piece now, the rest after a pause, like a piece
+            // sharing a slow link with the others in flight.
+            final half = body.length ~/ 2;
+            response.add(body.sublist(0, half));
+            await response.flush();
+            timers.add(
+              Timer(const Duration(seconds: 3), () {
+                try {
+                  response.add(body.sublist(half));
                   unawaited(response.close().catchError((Object _) {}));
                 } catch (_) {}
               }),
@@ -399,7 +502,10 @@ void main() {
     final whole = await fetch(url);
     expect(whole.$1.statusCode, 200);
     expect(whole.$2, source);
-    expect((await fetch(url, range: 'bytes=10-99')).$2, source.sublist(10, 100));
+    expect(
+      (await fetch(url, range: 'bytes=10-99')).$2,
+      source.sublist(10, 100),
+    );
   });
 
   test('HEAD, suffix, open-ended seek and 416 responses', () async {
@@ -597,6 +703,36 @@ void main() {
     expect(paths.length, lessThanOrEqualTo(10));
   });
 
+  test('a piece reaches the player while it is still arriving', () async {
+    final response = await (await client.getUrl(
+      Uri.parse(register(['/trickle'])),
+    )).close();
+    final watch = Stopwatch()..start();
+    final bytes = <int>[];
+    final early = Completer<Duration>();
+    await response.forEach((chunk) {
+      bytes.addAll(chunk);
+      // The head plus part of the first piece, which completes after 3 s.
+      if (bytes.length > 65536 + 100000 && !early.isCompleted) {
+        early.complete(watch.elapsed);
+      }
+    });
+    expect(await early.future, lessThan(const Duration(seconds: 2)));
+    expect(bytes, source);
+  });
+
+  test('pieces arriving at the usual speed get no second copy', () async {
+    source = Uint8List.fromList(List.generate(3 << 20, (i) => i % 251));
+    proxy.close();
+    proxy = RipperRangeProxy(concurrency: 8, userAgent: 'test');
+    await proxy.start();
+    final result = await fetch(register(['/pace', '/pace-b']));
+    expect(result.$2, source);
+    // A copy asks for the same piece end as its first copy.
+    final ends = requests.where((r) => r.$2 >= 65536).map((r) => r.$3);
+    expect(ends.length - ends.toSet().length, lessThanOrEqualTo(3));
+  });
+
   test(
     'interrupted verified pieces resume without dropping or repeating bytes',
     () async {
@@ -614,6 +750,54 @@ void main() {
       );
     },
   );
+
+  group('refused URLs', () {
+    late int refused;
+    setUp(() async {
+      proxy.close();
+      refused = 0;
+      proxy = RipperRangeProxy(
+        concurrency: 4,
+        userAgent: 'test',
+        onRefused: () => refused++,
+      );
+      await proxy.start();
+    });
+
+    test('a track every node refuses is reported', () async {
+      final result = await fetch(register(['/forbidden', '/gone']));
+      expect(result.$1.statusCode, 502);
+      expect(refused, 1);
+    });
+
+    test('other failures and a single refusing node are not', () async {
+      expect((await fetch(register(['/wrong']))).$1.statusCode, 502);
+      expect((await fetch(register(['/forbidden', '/good']))).$2, source);
+      expect(refused, 0);
+    });
+
+    test('refusals are reported before the request gives up', () async {
+      // mpv cancels a request by reconnecting after 5 s without data, while
+      // trying every node in turn can take longer.
+      unawaited(
+        fetch(
+          register(['/forbidden', '/gone', '/jam']),
+        ).then((_) {}, onError: (Object _) {}),
+      );
+      await Future<void>.delayed(const Duration(seconds: 1));
+      expect(refused, 1);
+    });
+
+    test('refusals after the headers are reported too', () async {
+      // The deadline passes while the track streams: the head is served, the
+      // pieces after it are refused, and the response is cut short.
+      await expectLater(
+        fetch(register(['/expiring'])),
+        throwsA(isA<HttpException>()),
+      );
+      expect(refused, 1);
+    });
+  });
 
   test('hedge resumes the live primary prefix on a different node', () async {
     final watch = Stopwatch()..start();

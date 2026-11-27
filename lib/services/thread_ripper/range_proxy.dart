@@ -18,10 +18,41 @@ class RipperRangeProxy {
     required this.userAgent,
     this.referer = 'https://www.bilibili.com/',
     this.onActiveRequestsChanged,
+    this.onRefused,
   }) : _fixedConcurrency = concurrency,
        assert(concurrency > 0 && concurrency <= 128);
 
   final void Function(int active)? onActiveRequestsChanged;
+
+  /// Nodes refuse (403/410) every request once the signed URLs pass their
+  /// `deadline=`; only new URLs help. mpv reconnects once and takes the error
+  /// as the end of the track: the picture freezes while the audio plays on,
+  /// or the other way round. Called at most every 10 s.
+  final void Function()? onRefused;
+  DateTime? _refusalReportedAt;
+
+  // Reported once two nodes, or every node if the track has fewer, refused
+  // with nothing completed in between. Waiting for a request to fail on
+  // every node takes longer than mpv waits before it reconnects, which
+  // cancels that request. Requiring one of the playurl's own URLs among them
+  // never fired on a device: retries go to the first eight candidates, which
+  // are mostly synthesized mirrors.
+  void _refused(_Track track, Uri url) {
+    String node(Uri url) => '${url.host}:${url.port}${url.path}';
+    final nodes = track.refusedBy..add(node(url));
+    if (_closed ||
+        nodes.length < min(2, track.resolver.urls.map(node).toSet().length)) {
+      return;
+    }
+    final now = DateTime.now();
+    final last = _refusalReportedAt;
+    if (last != null && now.difference(last) < const Duration(seconds: 10)) {
+      return;
+    }
+    _refusalReportedAt = now;
+    onRefused?.call();
+  }
+
   final int _fixedConcurrency;
   final RipperAutoConcurrency? autoConcurrency;
   int get concurrency => autoConcurrency?.threads ?? _fixedConcurrency;
@@ -30,8 +61,31 @@ class RipperRangeProxy {
   final _assignments = RipperAssignments();
   double _connectionBps = 0;
   double _pieceMs = 0;
+  // How long a request on this route waits for its response head.
+  double _headMs = 0;
   int get _hedgeMs =>
       _pieceMs == 0 ? 900 : (_pieceMs * 1.5).round().clamp(250, 900);
+
+  // Upstream hedgeDue without a playback deadline. The fixed delay alone
+  // copied nearly every piece once the link itself was the limit, as each took
+  // longer than 900 ms; the copies took a third of the bandwidth and playback
+  // stalled. A copy now starts for a first copy that is stopped, slower than
+  // this route's connections, or slower than the copy's node; a copy beside
+  // one on pace only takes bandwidth from the pieces behind it.
+  bool _hedgeDue(_Receiving first, int delayMs, double copyBps) {
+    final ran = first.clock?.elapsedMilliseconds;
+    if (ran == null || ran < delayMs) return false;
+    // A node not measured yet is tried, as the chance of a faster one.
+    if (copyBps == 0 || _connectionBps == 0) return true;
+    // No body yet: heads queue behind the other transfers on a busy link.
+    if (first.received == 0) return ran >= _headMs * 1.5;
+    if (ran - first.lastAt >= delayMs) return true;
+    // Judge the pace over a whole delay of transfer, not the wait for it.
+    final moving = ran - first.firstAt;
+    if (moving < delayMs) return false;
+    final rate = first.received * 1000 / moving;
+    return copyBps > rate * 1.5 || rate < _connectionBps * .6;
+  }
 
   void _measure(int bytes, Duration elapsed) {
     if (bytes < 48 * 1024 || elapsed.inMicroseconds <= 0) return;
@@ -219,6 +273,7 @@ class RipperRangeProxy {
     await _slot(job, rescue: rescue, priority: priority);
     HttpClientRequest? request;
     final clock = Stopwatch()..start();
+    receiving?.clock = clock;
     Timer? deadline;
     int status = 0;
     int received = 0;
@@ -252,6 +307,8 @@ class RipperRangeProxy {
         ..set(HttpHeaders.userAgentHeader, userAgent)
         ..set(HttpHeaders.refererHeader, referer);
       final response = await request.close().timeout(firstByte - clock.elapsed);
+      final headMs = clock.elapsedMicroseconds / 1000;
+      _headMs = _headMs == 0 ? headMs : _headMs * .7 + headMs * .3;
       status = response.statusCode;
       final match = RegExp(r'^bytes (\d+)-(\d+)/(\d+)$').firstMatch(
         response.headers.value(HttpHeaders.contentRangeHeader) ?? '',
@@ -284,12 +341,13 @@ class RipperRangeProxy {
           receiving?.chunks.clear();
           throw const HttpException('Oversized CDN Range body');
         }
-        receiving?.chunks.add(chunk);
+        receiving?.add(chunk, clock.elapsedMilliseconds);
       }
       if (bytes.length != end - start + 1) {
         throw const HttpException('Truncated CDN Range body');
       }
       completed = true;
+      track.refusedBy.clear();
       _measure(received, clock.elapsed);
       track.resolver.success(url, bytes.length, clock.elapsed);
       final result = BytesBuilder(copy: false);
@@ -298,6 +356,7 @@ class RipperRangeProxy {
       return _Piece(result.takeBytes(), total, url);
     } catch (error) {
       if (receiving != null) resume?.keep(receiving.snapshot());
+      if (status == 403 || status == 410) _refused(track, url);
       if (!job.cancelled) {
         track.resolver.failure(url, status: status, received: received);
         if (status == 412 || status == 429) {
@@ -333,12 +392,14 @@ class RipperRangeProxy {
     bool startup = false,
     bool hurry = false,
     _Resume? resume,
+    _Feed? feed,
   }) async {
     final result = Completer<_Piece>();
     final jobs = <_Job>[];
     final timers = <Timer>[];
     final launched = <int>{};
     final receiving = List.generate(urls.length, (_) => _Receiving());
+    if (feed != null) receiving.forEach(feed.add);
     int failures = 0;
     void launch(int index) {
       if (result.isCompleted || parent.cancelled || !launched.add(index)) {
@@ -384,8 +445,24 @@ class RipperRangeProxy {
           : _hedgeMs;
       if (delay == 0) {
         launch(i);
-      } else {
+      } else if (metadata) {
         timers.add(Timer(Duration(milliseconds: delay), () => launch(i)));
+      } else {
+        // Checked every 50 ms like upstream, from the first check due.
+        void check() {
+          if (result.isCompleted || parent.cancelled) return;
+          if (_hedgeDue(
+            receiving.first,
+            delay,
+            track.resolver.speed(urls[i]),
+          )) {
+            launch(i);
+          } else {
+            timers.add(Timer(const Duration(milliseconds: 50), check));
+          }
+        }
+
+        timers.add(Timer(Duration(milliseconds: delay), check));
       }
     }
     try {
@@ -412,6 +489,7 @@ class RipperRangeProxy {
     bool metadata = false,
     bool startup = false,
     bool hurry = false,
+    _Feed? feed,
   }) async {
     final clock = Stopwatch()..start();
     final resume = _Resume(end - start + 1);
@@ -474,6 +552,7 @@ class RipperRangeProxy {
             startup: startup,
             hurry: hurry,
             resume: resume,
+            feed: feed,
           );
           job.check();
           autoConcurrency?.delivered(piece.bytes.length);
@@ -613,7 +692,8 @@ class RipperRangeProxy {
         var primaries = <Uri>[];
         var batchIndex = 0;
         var size = 64 * 1024;
-        final pieces = <Future<(_Piece?, Object?, StackTrace?)>>[];
+        var written = headEnd + 1;
+        final pieces = <(_Feed, Future<(_Piece?, Object?, StackTrace?)>)>[];
         void enqueue() {
           if (cursor > end) return;
           if (batchIndex >= primaries.length) {
@@ -652,23 +732,29 @@ class RipperRangeProxy {
           // instead of turning the upstream 64 KiB minimum into a fixed size.
           final last = min(end, cursor + size - 1);
           final primary = primaries[batchIndex++];
-          pieces.add(
-            _download(
-              track,
-              cursor,
-              last,
-              job,
-              preferred: [primary, ...preferred.where((url) => url != primary)],
-              pieceIndex: index,
-              hurry: index <= budget,
-              priority: index <= budget
-                  ? 120 - min(30, index++)
-                  : 55 - min(20, index++ % budget),
-            ).then(
-              (piece) => (piece, null, null),
-              onError: (Object error, StackTrace stack) => (null, error, stack),
-            ),
-          );
+          final feed = _Feed(cursor);
+          final result =
+              _download(
+                track,
+                cursor,
+                last,
+                job,
+                preferred: [
+                  primary,
+                  ...preferred.where((url) => url != primary),
+                ],
+                pieceIndex: index,
+                hurry: index <= budget,
+                priority: index <= budget
+                    ? 120 - min(30, index++)
+                    : 55 - min(20, index++ % budget),
+                feed: feed,
+              ).then<(_Piece?, Object?, StackTrace?)>(
+                (piece) => (piece, null, null),
+                onError: (Object error, StackTrace stack) =>
+                    (null, error, stack),
+              );
+          pieces.add((feed, result.whenComplete(feed.finish)));
           cursor = last + 1;
         }
 
@@ -676,13 +762,33 @@ class RipperRangeProxy {
           enqueue();
         }
         while (pieces.isNotEmpty) {
-          final (piece, error, stack) = await pieces.removeAt(0);
+          final (feed, result) = pieces.first;
+          // Pass on the next piece's bytes as they arrive. Waiting for whole
+          // pieces that share a slow link with the rest in flight starved
+          // playback, audio first: its 64 KiB head lasts about two seconds.
+          while (!feed.done) {
+            if (feed.from(written) case final bytes?) {
+              socket.add(bytes);
+              written += bytes.length;
+              await job.race(socket.flush());
+            } else {
+              await job.race(feed.changed);
+            }
+            job.check();
+          }
+          pieces.removeAt(0);
+          final (piece, error, stack) = await result;
           if (error != null) Error.throwWithStackTrace(error, stack!);
           job.check();
           if (piece!.total != total) {
             throw const HttpException('Resource changed');
           }
-          socket.add(piece.bytes);
+          if (written < feed.start + piece.bytes.length) {
+            socket.add(
+              Uint8List.sublistView(piece.bytes, written - feed.start),
+            );
+            written = feed.start + piece.bytes.length;
+          }
           await job.race(socket.flush());
           job.check();
           budget = pieceBudget();
@@ -757,6 +863,8 @@ class _Track {
   int? total;
   _Job? request;
   bool opened = false;
+  // Nodes that refused the track since its last complete piece.
+  final refusedBy = <String>{};
 }
 
 class _Piece {
@@ -783,6 +891,23 @@ class _Resume {
 class _Receiving {
   Uint8List? base;
   final chunks = <List<int>>[];
+  void Function()? onData;
+  // From the moment this copy held a connection: when its first and latest
+  // bytes arrived, and how many it received itself (the base excluded).
+  Stopwatch? clock;
+  int firstAt = 0;
+  int lastAt = 0;
+  int received = 0;
+
+  void add(List<int> chunk, int at) {
+    if (received == 0) firstAt = at;
+    lastAt = at;
+    received += chunk.length;
+    chunks.add(chunk);
+    onData?.call();
+  }
+
+  int get length => chunks.fold(base?.length ?? 0, (n, c) => n + c.length);
   Uint8List snapshot() {
     final bytes = BytesBuilder(copy: false);
     if (base != null) bytes.add(base!);
@@ -790,6 +915,63 @@ class _Receiving {
       bytes.add(chunk);
     }
     return bytes.takeBytes();
+  }
+
+  /// The received bytes from [offset] within the piece on.
+  Uint8List from(int offset) {
+    final bytes = BytesBuilder(copy: false);
+    var at = 0;
+    for (final part in [?base, ...chunks]) {
+      final next = at + part.length;
+      if (next > offset) {
+        bytes.add(at >= offset ? part : part.sublist(offset - at));
+      }
+      at = next;
+    }
+    return bytes.takeBytes();
+  }
+}
+
+/// A piece still downloading, readable up to its furthest replica. Every
+/// replica holds a verified prefix of the same bytes.
+class _Feed {
+  _Feed(this.start);
+  final int start;
+  final _replicas = <_Receiving>[];
+  Completer<void>? _waiter;
+  bool done = false;
+
+  void add(_Receiving replica) {
+    _replicas.add(replica);
+    replica.onData = _wake;
+  }
+
+  void _wake() {
+    _waiter?.complete();
+    _waiter = null;
+  }
+
+  void finish() {
+    done = true;
+    _wake();
+  }
+
+  /// Completes when a replica receives more or the piece finishes.
+  Future<void> get changed => (_waiter ??= Completer<void>()).future;
+
+  /// Bytes from file offset [position] on, if any have arrived.
+  Uint8List? from(int position) {
+    final offset = position - start;
+    _Receiving? best;
+    var most = offset;
+    for (final replica in _replicas) {
+      final length = replica.length;
+      if (length > most) {
+        most = length;
+        best = replica;
+      }
+    }
+    return best?.from(offset);
   }
 }
 

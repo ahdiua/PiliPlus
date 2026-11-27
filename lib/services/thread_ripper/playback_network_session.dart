@@ -42,10 +42,16 @@ class PlaybackNetworkSession {
     required this.userAgent,
     DirectCdnSelector? selector,
     this.proxyFactory,
+    this.onRefused,
   }) : selector = selector ?? DirectCdnSelector(userAgent: userAgent);
 
   final String userAgent;
   final DirectCdnSelector selector;
+
+  /// The current BTR session's nodes refused the signed URLs (403/410), as
+  /// they do once the playurl's `deadline=` has passed. See
+  /// [RipperRangeProxy.onRefused].
+  final void Function()? onRefused;
   final RipperRangeProxy Function(
     PlaybackNetworkOptions,
     RipperAutoConcurrency,
@@ -85,6 +91,9 @@ class PlaybackNetworkSession {
             overseas: options.overseas,
             autoConcurrency: options.autoConcurrency ? _autoConcurrency : null,
             userAgent: userAgent,
+            onRefused: () {
+              if (generation == _generation) onRefused?.call();
+            },
           );
       _proxy = proxy;
       try {
