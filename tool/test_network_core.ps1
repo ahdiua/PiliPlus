@@ -1,5 +1,9 @@
 param(
-    [string]$Dart = "dart"
+    [string]$Dart = "dart",
+    # Run tool/network_bench/link_bench.dart instead of the tests; see its
+    # header for -BenchArgs.
+    [switch]$Bench,
+    [string[]]$BenchArgs = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,6 +24,10 @@ foreach ($networkTestName in @("thread_ripper_test.dart", "thread_ripper_auto_te
 }
 Get-ChildItem -LiteralPath "$networkRepo/test/fixtures" -Filter "ripper_*.json" |
     Copy-Item -Destination "$networkTests/fixtures" -Force
+$networkBench = Join-Path $networkHarness "bench"
+New-Item -ItemType Directory -Path $networkBench -Force | Out-Null
+Get-ChildItem -LiteralPath "$networkRepo/tool/network_bench" -Filter "*.dart" |
+    Copy-Item -Destination $networkBench -Force
 
 @'
 name: PiliPlus
@@ -40,7 +48,14 @@ Push-Location $networkHarness
 try {
     & $Dart pub get
     if ($LASTEXITCODE -ne 0) { throw "Network core dependency resolution failed" }
-    & $Dart analyze lib test
+    if ($Bench) {
+        & $Dart analyze lib bench
+        if ($LASTEXITCODE -ne 0) { throw "Network bench analysis failed" }
+        & $Dart run bench/link_bench.dart @BenchArgs
+        if ($LASTEXITCODE -ne 0) { throw "Network bench failed" }
+        return
+    }
+    & $Dart analyze lib test bench
     if ($LASTEXITCODE -ne 0) { throw "Network core analysis failed" }
     & $Dart test --reporter expanded
     if ($LASTEXITCODE -ne 0) { throw "Network core tests failed" }
