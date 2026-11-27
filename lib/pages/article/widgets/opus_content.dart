@@ -13,7 +13,7 @@ import 'package:PiliPlus/models/common/image_preview_type.dart';
 import 'package:PiliPlus/models/dynamics/article_content_model.dart'
     show ArticleContentModel, Rich, Style, Word, Node;
 import 'package:PiliPlus/models/dynamics/result.dart';
-import 'package:PiliPlus/pages/article/widgets/sliver_list_ext.dart';
+import 'package:PiliPlus/common/widgets/sliver/sliver_reverse.dart';
 import 'package:PiliPlus/pages/dynamics/widgets/vote.dart';
 import 'package:PiliPlus/utils/app_scheme.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
@@ -21,9 +21,11 @@ import 'package:PiliPlus/utils/extension/theme_ext.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
 import 'package:PiliPlus/utils/num_utils.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
+import 'package:PiliPlus/utils/parse_string.dart';
 import 'package:cached_network_image_ce/cached_network_image.dart';
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:get/get_core/src/get_main.dart';
 import 'package:get/get_navigation/src/extension_navigation.dart';
 import 'package:material_design_icons_flutter/material_design_icons_flutter.dart';
@@ -56,6 +58,7 @@ class OpusContent extends StatelessWidget {
     required ColorScheme colorScheme,
     required ValueGetter<double> surfaceLuminance,
   }) {
+    const iconSize = 17.0;
     switch (item.type) {
       case 'TEXT_NODE_TYPE_RICH' when (item.rich != null):
         final rich = item.rich!;
@@ -79,75 +82,133 @@ class OpusContent extends StatelessWidget {
                 ),
               ),
             );
-          case 'RICH_TEXT_NODE_TYPE_LOTTERY':
-            return TextSpan(
-              children: [
-                WidgetSpan(
+          default:
+            InlineSpan? icon;
+            final isRich = rich.type != 'RICH_TEXT_NODE_TYPE_TEXT';
+            final color = isRich ? colorScheme.primary : null;
+            switch (rich.type) {
+              case 'RICH_TEXT_NODE_TYPE_WEB':
+                icon = WidgetSpan(
                   alignment: .middle,
                   child: Icon(
-                    Icons.redeem_rounded,
-                    size: 16,
-                    color: colorScheme.primary,
+                    Icons.link,
+                    color: color,
+                    size: iconSize,
                   ),
-                ),
-                TextSpan(
-                  text: '${rich.origText} ',
-                  style: TextStyle(color: colorScheme.primary),
-                  recognizer: NoDeadlineTapGestureRecognizer()
-                    ..onTap = () => Get.toNamed(
-                      '/webview',
-                      parameters: {
-                        'url':
-                            'https://www.bilibili.com/h5/lottery/result?business_id=$opusId',
-                      },
-                    ),
-                ),
-              ],
-            );
-          case 'RICH_TEXT_NODE_TYPE_VOTE':
-            final rid = rich.rid != null ? int.tryParse(rich.rid!) : null;
-            return TextSpan(
-              children: [
-                WidgetSpan(
+                );
+              case 'RICH_TEXT_NODE_TYPE_AV':
+                icon = WidgetSpan(
+                  alignment: .middle,
+                  child: Icon(
+                    Icons.play_circle_outline_rounded,
+                    color: color,
+                    size: iconSize,
+                  ),
+                );
+              case 'RICH_TEXT_NODE_TYPE_VOTE':
+                icon = WidgetSpan(
                   alignment: .middle,
                   child: Icon(
                     Icons.bar_chart_rounded,
-                    size: 16,
+                    size: iconSize,
                     color: colorScheme.primary,
                   ),
-                ),
+                );
+              case 'RICH_TEXT_NODE_TYPE_LOTTERY':
+                icon = WidgetSpan(
+                  alignment: .middle,
+                  child: Icon(
+                    Icons.redeem_rounded,
+                    size: iconSize,
+                    color: colorScheme.primary,
+                  ),
+                );
+              case 'RICH_TEXT_NODE_TYPE_LIVE':
+                icon = WidgetSpan(
+                  alignment: .middle,
+                  child: Icon(
+                    Icons.live_tv,
+                    color: color,
+                    size: iconSize,
+                  ),
+                );
+              case 'RICH_TEXT_NODE_TYPE_COMMENT':
+                icon = WidgetSpan(
+                  alignment: .middle,
+                  child: Icon(
+                    FontAwesomeIcons.comment,
+                    color: color,
+                    size: 16,
+                  ),
+                );
+              case 'RICH_TEXT_NODE_TYPE_GAME':
+                icon = WidgetSpan(
+                  alignment: .middle,
+                  child: Icon(
+                    Icons.sports_esports_outlined,
+                    color: color,
+                    size: 19,
+                  ),
+                );
+              case 'RICH_TEXT_NODE_TYPE_MUSIC':
+                icon = WidgetSpan(
+                  alignment: .middle,
+                  child: Icon(
+                    MdiIcons.musicCircleOutline,
+                    color: color,
+                    size: iconSize,
+                  ),
+                );
+              case 'RICH_TEXT_NODE_TYPE_GOODS':
+                icon = WidgetSpan(
+                  alignment: .middle,
+                  child: Icon(
+                    Icons.shopping_bag_outlined,
+                    color: color,
+                    size: iconSize,
+                  ),
+                );
+              case 'RICH_TEXT_NODE_TYPE_MANGA':
+                icon = WidgetSpan(
+                  alignment: .middle,
+                  child: Icon(
+                    Icons.newspaper,
+                    color: color,
+                    size: iconSize,
+                  ),
+                );
+            }
+            return TextSpan(
+              style: _getStyle(rich.style, color: color),
+              children: [
+                ?icon,
+                if (isRich) const TextSpan(text: ' '),
                 TextSpan(
-                  text: ' ${rich.origText} ',
-                  style: TextStyle(color: colorScheme.primary),
-                  recognizer: rid != null
-                      ? (NoDeadlineTapGestureRecognizer()
-                          ..onTap = () => showVoteDialog(Get.context!, rid))
-                      : null,
+                  text: '${rich.text}',
+                  recognizer: NoDeadlineTapGestureRecognizer()
+                    ..onTap = () {
+                      switch (rich.type) {
+                        case 'RICH_TEXT_NODE_TYPE_AT':
+                          Get.toNamed('/member?mid=${rich.rid}');
+                        case 'RICH_TEXT_NODE_TYPE_VOTE':
+                          final rid = parseIntOrNull(rich.rid);
+                          if (rid != null) showVoteDialog(Get.context!, rid);
+                        case 'RICH_TEXT_NODE_TYPE_LOTTERY':
+                          Get.toNamed(
+                            '/webview',
+                            parameters: {
+                              'url':
+                                  'https://www.bilibili.com/h5/lottery/result?business_id=$opusId',
+                            },
+                          );
+                        default:
+                          if (rich.jumpUrl != null) {
+                            PiliScheme.routePushFromUrl(rich.jumpUrl!);
+                          }
+                      }
+                    },
                 ),
               ],
-            );
-          default:
-            return TextSpan(
-              text:
-                  '${rich.type == 'RICH_TEXT_NODE_TYPE_WEB' ? '\u{1F517}' : ''}${item.rich!.text}',
-              style: _getStyle(
-                rich.style,
-                rich.type == 'RICH_TEXT_NODE_TYPE_TEXT'
-                    ? null
-                    : colorScheme.primary,
-              ),
-              recognizer: NoDeadlineTapGestureRecognizer()
-                ..onTap = () {
-                  switch (rich.type) {
-                    case 'RICH_TEXT_NODE_TYPE_AT':
-                      Get.toNamed('/member?mid=${rich.rid}');
-                    // case 'RICH_TEXT_NODE_TYPE_TOPIC':
-                    default:
-                      if (rich.jumpUrl != null) {
-                        PiliScheme.routePushFromUrl(rich.jumpUrl!);
-                      }
-                  }
-                },
             );
         }
       case 'TEXT_NODE_TYPE_FORMULA' when (item.formula != null):
@@ -175,17 +236,20 @@ class OpusContent extends StatelessWidget {
     }
   }
 
-  static TextStyle _getStyle(Style? style, [Color? color, double? fontSize]) =>
-      TextStyle(
-        decoration: style?.strikethrough == true
-            ? TextDecoration.lineThrough
-            : null,
-        decorationColor: color,
-        fontStyle: style?.italic == true ? FontStyle.italic : null,
-        fontWeight: style?.bold == true ? .bold : null,
-        color: color,
-        fontSize: fontSize,
-      );
+  static TextStyle _getStyle(
+    Style? style, {
+    Color? color,
+    double? fontSize,
+  }) => TextStyle(
+    decoration: style?.strikethrough == true
+        ? TextDecoration.lineThrough
+        : null,
+    decorationColor: color,
+    fontStyle: style?.italic == true ? .italic : null,
+    fontWeight: style?.bold == true ? .bold : null,
+    color: color,
+    fontSize: style?.fontSize ?? fontSize ?? 16,
+  );
 
   static TextSpan _getSpan(
     Word? word, {
@@ -212,8 +276,8 @@ class OpusContent extends StatelessWidget {
       text: word?.words,
       style: _getStyle(
         word?.style,
-        color ?? defaultColor,
-        word?.effectiveFontSize,
+        color: color ?? defaultColor,
+        fontSize: word?.effectiveFontSize,
       ),
     );
   }
@@ -233,7 +297,7 @@ class OpusContent extends StatelessWidget {
 
     late final highlight = Highlight()..registerLanguages(builtinAllLanguages);
 
-    return SliverListExt.separated(
+    return SliverListReverse.separated(
       reverse: reverse,
       itemCount: opus.length,
       itemBuilder: (context, index) {
@@ -268,7 +332,11 @@ class OpusContent extends StatelessWidget {
                 ];
               }
               Widget widget = Text.rich(
-                textAlign: element.align == 1 ? .center : null,
+                textAlign: switch (element.align) {
+                  1 => .center,
+                  2 => .end,
+                  _ => null,
+                },
                 TextSpan(children: spans),
               );
               if (isQuote) {
@@ -428,13 +496,14 @@ class OpusContent extends StatelessWidget {
                   }).toList(),
                 ),
               );
-            case 6:
+            case 6 when element.linkCard?.card?.type != null:
               double? height = 65;
-              final type = element.linkCard!.card!.type;
+              final card = element.linkCard!.card!;
+              final type = card.type;
               Widget child;
               switch (type) {
                 case 'LINK_CARD_TYPE_UGC':
-                  final ugc = element.linkCard!.card!.ugc!;
+                  final ugc = card.ugc!;
                   child = Row(
                     spacing: 10,
                     children: [
@@ -471,7 +540,7 @@ class OpusContent extends StatelessWidget {
                   );
                 case 'LINK_CARD_TYPE_ITEM_NULL':
                   height = null;
-                  final itemNull = element.linkCard?.card?.itemNull;
+                  final itemNull = card.itemNull!;
                   child = Text.rich(
                     TextSpan(
                       children: [
@@ -484,14 +553,13 @@ class OpusContent extends StatelessWidget {
                           ),
                         ),
                         TextSpan(
-                          text:
-                              ' ${itemNull?.text}(${element.linkCard?.card?.oid})',
+                          text: ' ${itemNull.text}(${card.oid})',
                         ),
                       ],
                     ),
                   );
                 case 'LINK_CARD_TYPE_COMMON':
-                  final common = element.linkCard!.card!.common!;
+                  final common = card.common!;
                   child = Row(
                     spacing: 10,
                     children: [
@@ -538,7 +606,7 @@ class OpusContent extends StatelessWidget {
                     ],
                   );
                 case 'LINK_CARD_TYPE_LIVE':
-                  final live = element.linkCard!.card!.live!;
+                  final live = card.live!;
                   final liveState = live.liveState == 1;
                   child = Row(
                     spacing: 10,
@@ -597,7 +665,7 @@ class OpusContent extends StatelessWidget {
                     ],
                   );
                 case 'LINK_CARD_TYPE_OPUS':
-                  final opus = element.linkCard!.card!.opus!;
+                  final opus = card.opus!;
                   child = Row(
                     spacing: 10,
                     children: [
@@ -633,7 +701,7 @@ class OpusContent extends StatelessWidget {
                     ],
                   );
                 case 'LINK_CARD_TYPE_VOTE':
-                  final vote = element.linkCard!.card!.vote!;
+                  final vote = card.vote!;
                   child = Row(
                     spacing: 10,
                     children: [
@@ -676,7 +744,7 @@ class OpusContent extends StatelessWidget {
                     ],
                   );
                 case 'LINK_CARD_TYPE_MUSIC':
-                  final music = element.linkCard!.card!.music!;
+                  final music = card.music!;
                   child = Row(
                     spacing: 10,
                     children: [
@@ -714,7 +782,7 @@ class OpusContent extends StatelessWidget {
                   );
                 case 'LINK_CARD_TYPE_GOODS':
                   height = null;
-                  final goods = element.linkCard!.card!.goods!;
+                  final goods = card.goods!;
                   child = Column(
                     children: goods.items!.map((e) {
                       Widget child = SizedBox(
@@ -775,7 +843,7 @@ class OpusContent extends StatelessWidget {
                     }).toList(),
                   );
                 case "LINK_CARD_TYPE_EVA3_VIDEO":
-                  final info = element.linkCard!.card!.eva3Video!.info!;
+                  final info = card.eva3Video!.info!;
                   Widget cover = NetworkImgLayer(
                     width: 104,
                     height: 65,
@@ -828,7 +896,7 @@ class OpusContent extends StatelessWidget {
                     ],
                   );
                 case "LINK_CARD_TYPE_EVA3_OPUS":
-                  final info = element.linkCard!.card!.eva3Opus!.info!;
+                  final info = card.eva3Opus!.info!;
                   final cover = info.pics?.firstOrNull?.src;
                   child = Row(
                     spacing: 10,
@@ -897,7 +965,7 @@ class OpusContent extends StatelessWidget {
                   );
                 case "LINK_CARD_TYPE_EVA3_USER":
                   height = null;
-                  final info = element.linkCard!.card!.eva3User!.info!;
+                  final info = card.eva3User!.info!;
                   final user = info.user!;
                   child = Row(
                     spacing: 10,
@@ -948,7 +1016,7 @@ class OpusContent extends StatelessWidget {
                     ],
                   );
                 case "LINK_CARD_TYPE_EVA3_TOY":
-                  final info = element.linkCard!.card!.eva3Toy!.info!;
+                  final info = card.eva3Toy!.info!;
                   final user = info.up!;
                   child = Row(
                     spacing: 10,
@@ -993,7 +1061,7 @@ class OpusContent extends StatelessWidget {
                   );
                 case "LINK_CARD_TYPE_EVA3_VOTE":
                   height = null;
-                  final info = element.linkCard!.card!.eva3Vote!.info!;
+                  final info = card.eva3Vote!.info!;
                   child = Row(
                     spacing: 10,
                     children: [
@@ -1034,7 +1102,7 @@ class OpusContent extends StatelessWidget {
                   );
                 case "LINK_CARD_TYPE_EVA3_COMMENT":
                   height = null;
-                  final comment = element.linkCard!.card!.eva3Comment!.info!;
+                  final comment = card.eva3Comment!.info!;
                   child = Text(
                     '${comment.linkShowText}:\n${comment.source!.desc}',
                   );
@@ -1052,8 +1120,6 @@ class OpusContent extends StatelessWidget {
                 child = InkWell(
                   onTap: () {
                     try {
-                      final card = element.linkCard!.card!;
-
                       switch (type) {
                         case 'LINK_CARD_TYPE_VOTE':
                           showVoteDialog(
@@ -1063,12 +1129,11 @@ class OpusContent extends StatelessWidget {
                           return;
                         case 'LINK_CARD_TYPE_EVA3_USER':
                           Get.toNamed(
-                            '/member?mid=${element.linkCard!.card!.eva3User!.info!.user!.mid}',
+                            '/member?mid=${card.eva3User!.info!.user!.mid}',
                           );
                           return;
                         case 'LINK_CARD_TYPE_EVA3_VOTE':
-                          final id =
-                              element.linkCard!.card!.eva3Vote!.info!.voteId!;
+                          final id = card.eva3Vote!.info!.voteId!;
                           showVoteDialog(context, .parse(id));
                           return;
                       }
