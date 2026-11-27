@@ -80,6 +80,7 @@ List<SettingsModel> get videoSettings => [
     subtitle: '自动并发多个 CDN；关闭后恢复原来的直连模式和 CDN 设置',
     leading: const Icon(Icons.bolt_outlined),
     setKey: SettingBoxKey.threadRipperEnabled,
+    defaultVal: true,
     onChanged: (_) =>
         PlPlayerController.instance?.reloadNetworkSettings().ignore(),
   ),

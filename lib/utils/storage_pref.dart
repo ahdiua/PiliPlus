@@ -290,7 +290,7 @@ abstract final class Pref {
       _setting.get(SettingBoxKey.adaptivePlaybackBuffer, defaultValue: true);
 
   static bool get threadRipperEnabled =>
-      _setting.get(SettingBoxKey.threadRipperEnabled, defaultValue: false);
+      _setting.get(SettingBoxKey.threadRipperEnabled, defaultValue: true);
 
   static bool get threadRipperOverseas =>
       _setting.get(SettingBoxKey.threadRipperOverseas, defaultValue: true);
